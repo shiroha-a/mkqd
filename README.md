@@ -367,14 +367,59 @@ rotating a key in place takes effect without a restart — ActivityPub
 rotation keeps the key id and replaces the material, which a cache with
 no invalidation would never notice.
 
-Neither signer suits a server whose keys live only in its database. A
-remote signer — mkqd sends the string to sign, the application returns
-the signature, the key never moves — is the next slice.
+For a server whose keys live only in its database, `type: remote` keeps
+the key there: mkqd sends the string to sign and the application returns
+the signature.
+
+```yaml
+      signer:
+        type: remote
+        url: "http://127.0.0.1:3000/_mkqd/sign"
+        secret: "${MKQD_SIGNER_SECRET}"
+        timeout: 5s
+```
+
+The endpoint receives the same HMAC headers as an HTTP dispatch
+(`v1:<timestamp>:<body>`, see the dispatch contract above) and answers:
+
+```
+POST /_mkqd/sign
+{"keyId":"https://local.example/users/me#main-key",
+ "signingString":"<base64>","algorithm":"rsa-sha256"}
+
+200 {"keyId":"...","algorithm":"rsa-sha256","signature":"<base64>"}
+```
+
+The string to sign is base64 because it contains newlines, and a
+round trip through JSON should not be able to change a single byte of
+it. An empty `keyId` asks for the default key, and the response names
+the key that was used.
+
+Answer **410 Gone** for a key that does not exist: the delivery then
+fails permanently instead of retrying for something that will never
+appear. A **404 counts only when it carries a JSON body** — a bare 404
+is what a typo in `signer.url`, a route that is not mounted yet, or a
+proxy that does not forward the path all return, and discarding every
+queued activity on one of those would leave nothing to recover once the
+configuration is fixed. Any other failure — 5xx, a timeout — leaves the
+delivery retryable, so a signer having a bad minute does not cost
+activities.
+Because the endpoint is the operator's own rather than payload-supplied,
+loopback is allowed by default here — which also means an environment
+proxy applies (see the proxy note above). Loopback is exempt from Go's
+proxy rules, but a signer URL like `http://app.internal:3000/_mkqd/sign`
+with `HTTP_PROXY` set would route signing requests, and the signatures
+they return, through that proxy.
+
+Leave `secret` out and mkqd signs nothing and logs a warning: an
+unauthenticated signing endpoint will sign anything for anyone who can
+reach it, which on a shared host means any local process can
+impersonate any actor. Write it as `"${MKQD_SIGNER_SECRET}"` without a
+`:-` fallback so an unset variable fails at startup rather than
+silently disabling authentication.
 
 ## Roadmap
 
-- A remote signer, so a standalone mkqd can deliver for a multi-user
-  server without ever holding its private keys.
 - Inspect and admin subcommands (`counts`, `list`, `job`, `enqueue`,
   `pause`, `resume`, `retry`, `promote`, `rm`, `drain`).
 - Container image, compose example and an embedded sample application.

@@ -49,6 +49,11 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   digests and delivers an activity to a remote inbox, classifies the
   outcome the way the fediverse expects, guards the payload-supplied
   destination, and refuses to follow redirects. Configured signers:
-  `file` (one actor) and `dir` (one PEM per key id, revalidated on use
-  so an in-place key rotation is picked up without a restart).
+  `file` (one actor), `dir` (one PEM per key id, revalidated on use so an
+  in-place key rotation is picked up without a restart) and `remote`,
+  which asks the application to sign so that a multi-user server can run
+  mkqd standalone without its keys ever leaving the application. A
+  remote signer treats 410 (and a 404 the application authored) as a
+  missing key, and everything else as retryable, so a signing endpoint
+  that is merely unreachable cannot discard a queue.
 - `mkqd keys` prints where a `dir` signer looks for a key id.
