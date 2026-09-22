@@ -193,3 +193,42 @@ func TestExecutorTypesAreRegistered(t *testing.T) {
 	require.Contains(t, mkqd.RegisteredExecutors(), "http")
 	require.Contains(t, mkqd.RegisteredExecutors(), "webhook")
 }
+
+// net/http rejects an invalid header at send time, and that failure
+// arrives as a transport error — which would otherwise be retried
+// forever. A header that cannot be sent will never become sendable.
+func TestWebhook_InvalidPayloadHeaderIsPermanent(t *testing.T) {
+	srv, rec := serve(t, http.StatusOK, nil, "")
+	ex := buildWebhook(t, allowLoopback)
+
+	cases := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{"CRLF in value", map[string]string{"X-Bad": "a\r\nInjected: 1"}, "invalid value for header"},
+		{"space in name", map[string]string{"Bad Name": "v"}, "invalid header name"},
+		{"empty name", map[string]string{"": "v"}, "invalid header name"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ex.Execute(context.Background(), testJob(webhookPayload(t, WebhookPayload{
+				URL:     srv.URL,
+				Headers: tc.headers,
+				Body:    json.RawMessage(`{}`),
+			})))
+			require.ErrorIs(t, err, mkq.ErrUnrecoverable)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+
+	_, _, _, hits := rec.snapshot()
+	require.Equal(t, 0, hits, "an unsendable request must not be attempted")
+}
+
+func TestWebhook_ConfiguredHeadersAreValidatedAtBuildTime(t *testing.T) {
+	_, err := newWebhookExecutor(context.Background(), mkqd.BuildContext{Queue: "q"},
+		executorConfig(t, "type: webhook\nheaders:\n  \"Bad Name\": v"))
+	require.ErrorContains(t, err, "invalid header name")
+}

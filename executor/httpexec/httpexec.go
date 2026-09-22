@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/shiroha-a/mkq"
 	"github.com/shiroha-a/mkqd"
@@ -54,6 +55,14 @@ const (
 	// failedReasonLimit caps how much of a response body ends up in
 	// BullMQ's failedReason field, which dashboards render inline.
 	failedReasonLimit = 1 << 10
+	// drainLimit bounds the read-and-discard that lets a connection be
+	// reused. A response with more left over than this loses its
+	// keep-alive, which is the cheaper outcome.
+	drainLimit = 8 << 10
+	// headerValueLimit bounds the job metadata mkqd copies into request
+	// headers, so an oversized job name cannot push a request past a
+	// server's header limit.
+	headerValueLimit = 256
 )
 
 // Options is the configuration block of the "http" executor.
@@ -115,6 +124,9 @@ func newHTTPExecutor(_ context.Context, bc mkqd.BuildContext, cfg mkqd.ExecutorC
 	if err := checkTarget(opts.URL); err != nil {
 		return nil, fmt.Errorf("executor http: %w", err)
 	}
+	if err := checkHeaders(opts.Headers); err != nil {
+		return nil, fmt.Errorf("executor http: %w", err)
+	}
 	return &httpExecutor{
 		opts: opts,
 		snd:  newSender(opts.allowPrivate(), opts.maxResponseBytes(), userAgent(opts.UserAgent), bc.Logger),
@@ -169,12 +181,7 @@ func newSender(allowPrivate bool, maxBytes int64, ua string, log *slog.Logger) *
 	}
 	return &sender{
 		client: &http.Client{
-			Transport: &http.Transport{
-				DialContext:         safedial.NewDialer(allowPrivate).DialContext,
-				MaxIdleConns:        256,
-				MaxIdleConnsPerHost: 64,
-				IdleConnTimeout:     90 * time.Second,
-			},
+			Transport: newTransport(allowPrivate),
 			// リダイレクトは追わない。webhook では payload 由来の URL が
 			// SSRF ガードを通った後で private 宛へ飛ばされうるし、http でも
 			// 転送先が署名を検証できる保証がない。3xx はそのまま返して
@@ -187,6 +194,25 @@ func newSender(allowPrivate bool, maxBytes int64, ua string, log *slog.Logger) *
 		maxBytes:  maxBytes,
 		log:       log,
 	}
+}
+
+// newTransport builds the transport for a sender.
+//
+// **ガードが有効なときは環境変数のプロキシを使わない。** プロキシ経由だと
+// 接続先はプロキシのアドレスになり、safedial が検査するのも同じくプロキシに
+// なるので、本来の宛先に対する保護が丸ごと無効になる。ガードを切っている
+// (= 宛先を運用者が決めている) ときだけ HTTP_PROXY 等を尊重する。
+func newTransport(allowPrivate bool) *http.Transport {
+	t := &http.Transport{
+		DialContext:         safedial.NewDialer(allowPrivate).DialContext,
+		MaxIdleConns:        256,
+		MaxIdleConnsPerHost: 64,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	if allowPrivate {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	return t
 }
 
 // send posts body and turns the response into a handler outcome.
@@ -204,9 +230,12 @@ func (s *sender) send(ctx context.Context, target string, body []byte, secret st
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", s.userAgent)
-	req.Header.Set(HeaderQueue, job.Queue)
-	req.Header.Set(HeaderJobID, job.ID)
-	req.Header.Set(HeaderJobName, job.Name)
+	// job の名前と id は Redis 由来で、BullMQ の producer なら言語を問わず
+	// 何でも入れられる。ヘッダに載せる前に無害化する — これは通知であって
+	// 契約ではないので、変な名前のジョブを落とすより送り届けるほうがよい。
+	req.Header.Set(HeaderQueue, sanitizeHeaderValue(job.Queue))
+	req.Header.Set(HeaderJobID, sanitizeHeaderValue(job.ID))
+	req.Header.Set(HeaderJobName, sanitizeHeaderValue(job.Name))
 	req.Header.Set(HeaderAttempt, strconv.Itoa(job.AttemptsMade+1))
 
 	ts := time.Now().Unix()
@@ -223,7 +252,12 @@ func (s *sender) send(ctx context.Context, target string, body []byte, secret st
 		}
 		return nil, fmt.Errorf("mkqd/http: POST %s: %w", target, err)
 	}
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	// 接続を再利用するために残りを読み捨てるが、上限を付ける。
+	// **transport は gzip を自動で展開する。** 無制限に読み捨てると、
+	// 小さな圧縮ストリームが巨大に展開される応答で worker slot と帯域を
+	// timeout いっぱい占有されうる。webhook の宛先は payload 由来 =
+	// 信頼できないので、これは現実的な攻撃面になる。
+	defer func() { _, _ = io.CopyN(io.Discard, resp.Body, drainLimit); _ = resp.Body.Close() }()
 
 	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, s.maxBytes))
 	if readErr != nil {
@@ -265,12 +299,16 @@ const (
 // 仕事を落とさないほうが安全で、恒久的失敗にしてもジョブは failed set に残り
 // `mkqd retry` で戻せる。
 func classify(status int, header http.Header) outcome {
+	// 2xx を先に見る。成功した仕事には再試行するものがないので、
+	// 既定で X-Mkqd-Retry: no を付けているエンドポイントがあっても
+	// 成功が失敗に化けてはいけない。
+	if status >= 200 && status < 300 {
+		return outcomeSuccess
+	}
 	if strings.EqualFold(header.Get(HeaderRetry), "no") {
 		return outcomePermanent
 	}
 	switch {
-	case status >= 200 && status < 300:
-		return outcomeSuccess
 	case status >= 300 && status < 400:
 		// リダイレクトは追従しないので、追わない限り成功しない。
 		return outcomePermanent
@@ -320,11 +358,88 @@ func detail(header http.Header, payload []byte) string {
 	return truncate(string(trimmed), failedReasonLimit)
 }
 
+// truncate cuts s to at most limit bytes without splitting a rune, so a
+// non-ASCII failure message (a Japanese error from a Misskey endpoint,
+// say) stays valid UTF-8 in the dashboard.
 func truncate(s string, limit int) string {
 	if len(s) <= limit {
 		return s
 	}
-	return s[:limit] + "... (truncated)"
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "... (truncated)"
+}
+
+// sanitizeHeaderValue makes an arbitrary string safe to put in a header
+// value, replacing anything a field value may not contain and bounding
+// the length.
+func sanitizeHeaderValue(v string) string {
+	if len(v) > headerValueLimit {
+		v = truncate(v, headerValueLimit)
+	}
+	var b strings.Builder
+	for i := 0; i < len(v); i++ {
+		if validHeaderValueByte(v[i]) {
+			b.WriteByte(v[i])
+			continue
+		}
+		b.WriteByte('_')
+	}
+	return b.String()
+}
+
+// validHeaderName reports whether s is an RFC 9110 field name (a token).
+func validHeaderName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if !isTokenByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValue reports whether s may appear as a field value.
+func validHeaderValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !validHeaderValueByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// validHeaderValueByte mirrors what net/http accepts: no controls other
+// than tab, and no DEL.
+func validHeaderValueByte(b byte) bool {
+	return (b >= 0x20 || b == '\t') && b != 0x7f
+}
+
+func isTokenByte(b byte) bool {
+	switch {
+	case b >= 'a' && b <= 'z', b >= 'A' && b <= 'Z', b >= '0' && b <= '9':
+		return true
+	}
+	return strings.IndexByte("!#$%&'*+-.^_`|~", b) >= 0
+}
+
+// checkHeaders rejects a header set that net/http would refuse at send
+// time. Catching it here keeps the failure classifiable: an unsendable
+// header can never become sendable, so it must not burn retries.
+func checkHeaders(h map[string]string) error {
+	for k, v := range h {
+		if !validHeaderName(k) {
+			return fmt.Errorf("invalid header name %q", k)
+		}
+		if !validHeaderValue(v) {
+			return fmt.Errorf("invalid value for header %q", k)
+		}
+	}
+	return nil
 }
 
 // Sign returns the value of the X-Mkqd-Signature header: an HMAC-SHA256

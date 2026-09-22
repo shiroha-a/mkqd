@@ -264,9 +264,24 @@ to, so a hostname that re-resolves cannot slip past it. The `http`
 executor has the guard off by default, since there the URL comes from
 the operator and pointing it at `127.0.0.1` is the normal case.
 
-Any defect in the payload — no URL, a non-HTTP scheme, malformed JSON —
-fails the job permanently rather than retrying something that cannot
-start working.
+Any defect in the payload — no URL, a non-HTTP scheme, malformed JSON,
+a header name or value HTTP cannot carry — fails the job permanently
+rather than retrying something that cannot start working.
+
+Two things the destination cannot do to the worker: `max_response_bytes`
+(64 KiB by default) bounds what crosses the wire and not only what is
+kept, so a small gzip stream that inflates to gigabytes cannot hold a
+worker slot open; and job metadata copied into `X-Mkqd-*` headers is
+sanitized, so a job name containing CRLF cannot inject a header.
+
+**Proxies.** The guarded executor ignores `HTTP_PROXY` / `HTTPS_PROXY`:
+through a proxy the connection goes to the proxy's address, so that is
+what the guard would check, and the real destination would be
+unprotected. The `http` executor, whose destination the operator
+chooses, honours the environment proxy as usual. Turning
+`allow_private_network: true` on for `webhook` also turns the proxy
+back on, for the same reason — you have taken the destination decision
+back.
 
 ## Roadmap
 

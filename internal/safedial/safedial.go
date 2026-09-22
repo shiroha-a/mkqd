@@ -65,15 +65,25 @@ func CheckAddr(address string) error {
 	return nil
 }
 
-// nat64Prefix is the well-known NAT64 prefix. An address inside it
-// carries an IPv4 address in its low 32 bits, so it can name a private
-// v4 destination while looking like a public v6 one.
-var nat64Prefix = netip.MustParsePrefix("64:ff9b::/96")
+// v4EmbeddingPrefixes are the IPv6 ranges that carry an IPv4 address in
+// their low 32 bits. An address inside one of them can name a private
+// v4 destination while looking like a public v6 one, so the embedded
+// address has to be checked rather than the wrapper.
+//
+// 6to4 (2002::/16) と Teredo (2001::/32) も v4 を内包するが、そちらは
+// 範囲ごと blockedPrefixes で塞いでいるので展開の必要がない。
+var v4EmbeddingPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("64:ff9b::/96"),   // RFC 6052 well-known NAT64
+	netip.MustParsePrefix("64:ff9b:1::/48"), // RFC 8215 local-use NAT64
+	netip.MustParsePrefix("::/96"),          // RFC 4291 IPv4-compatible (deprecated)
+}
 
 // blockedPrefixes covers the ranges the netip.Addr predicates do not.
 var blockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),       // RFC 1122 "this network"
 	netip.MustParsePrefix("100.64.0.0/10"),   // RFC 6598 carrier-grade NAT
 	netip.MustParsePrefix("192.0.0.0/24"),    // RFC 6890 IETF protocol assignments
+	netip.MustParsePrefix("192.88.99.0/24"),  // RFC 7526 deprecated 6to4 relay anycast
 	netip.MustParsePrefix("192.0.2.0/24"),    // RFC 5737 documentation
 	netip.MustParsePrefix("198.18.0.0/15"),   // RFC 2544 benchmarking
 	netip.MustParsePrefix("198.51.100.0/24"), // RFC 5737 documentation
@@ -81,6 +91,7 @@ var blockedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),     // RFC 1112 reserved, includes 255.255.255.255
 	netip.MustParsePrefix("100::/64"),        // RFC 6666 discard-only
 	netip.MustParsePrefix("2001::/32"),       // RFC 4380 Teredo, embeds IPv4
+	netip.MustParsePrefix("2001:20::/28"),    // RFC 7343 ORCHIDv2, not routable
 	netip.MustParsePrefix("2001:db8::/32"),   // RFC 3849 documentation
 	netip.MustParsePrefix("2002::/16"),       // RFC 3056 6to4, embeds IPv4
 }
@@ -92,12 +103,13 @@ func IsPublic(ip netip.Addr) bool {
 	}
 	ip = ip.Unmap()
 
-	// NAT64 と 6to4 のように IPv4 を内側に抱える表現は、埋め込まれた
-	// v4 アドレスまで見ないと private 宛を見逃す。6to4 は範囲ごと塞ぐ
-	// のでここでは NAT64 だけを展開する。
-	if nat64Prefix.Contains(ip) {
-		b := ip.As16()
-		return IsPublic(netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}))
+	// IPv4 を内側に抱える表現は、埋め込まれた v4 アドレスまで見ないと
+	// private 宛を見逃す。
+	for _, p := range v4EmbeddingPrefixes {
+		if p.Contains(ip) {
+			b := ip.As16()
+			return IsPublic(netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}))
+		}
 	}
 
 	if ip.IsUnspecified() ||

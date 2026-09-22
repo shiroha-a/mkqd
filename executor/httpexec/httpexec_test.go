@@ -1,6 +1,7 @@
 package httpexec
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -12,8 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -378,4 +381,100 @@ func TestHTTP_UserAgentOverride(t *testing.T) {
 	require.NoError(t, err)
 	_, header, _, _ := rec.snapshot()
 	require.Equal(t, "my-app/2.0", header.Get("User-Agent"))
+}
+
+// A successful job has nothing to retry, so a blanket X-Mkqd-Retry: no
+// on an endpoint must not turn every success into a failure.
+func TestHTTP_RetryHeaderDoesNotSpoilSuccess(t *testing.T) {
+	srv, _ := serve(t, http.StatusOK,
+		map[string]string{HeaderRetry: "no", "Content-Type": "application/json"}, `{"ok":true}`)
+	out, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), testJob(`{}`))
+	require.NoError(t, err)
+	require.NotNil(t, out)
+}
+
+// max_response_bytes must bound what crosses the wire, not only what is
+// kept. The transport transparently inflates gzip, so an unbounded
+// drain lets a small compressed response occupy a worker for the whole
+// timeout.
+func TestHTTP_OversizedResponseIsNotDrainedWhole(t *testing.T) {
+	const bodySize = 8 << 20
+	var written atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		chunk := bytes.Repeat([]byte("z"), 32<<10)
+		for sent := 0; sent < bodySize; sent += len(chunk) {
+			n, err := w.Write(chunk)
+			written.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	_, err := buildHTTP(t, "type: http\nurl: "+srv.URL+"\nmax_response_bytes: 1024\ntimeout: 10s").
+		Execute(context.Background(), testJob(`{}`))
+	require.Error(t, err)
+
+	// 読み取り 1KiB + ドレイン上限 8KiB。書き込みは chunk 単位で進むので
+	// 余裕を持たせつつ、本文全体 (8MiB) を読み切らないことを確かめる。
+	require.Less(t, written.Load(), int64(bodySize/2),
+		"the whole body was transferred despite max_response_bytes")
+}
+
+func TestHTTP_JobMetadataIsSanitizedIntoHeaders(t *testing.T) {
+	srv, rec := serve(t, http.StatusOK, nil, "")
+	ex := buildHTTP(t, "type: http\nurl: "+srv.URL)
+
+	job := testJob(`{}`)
+	// BullMQ の producer は言語を問わず任意の名前を付けられる。
+	job.Name = "note\r\nInjected: 1"
+	job.ID = "7\r\n"
+
+	_, err := ex.Execute(context.Background(), job)
+	require.NoError(t, err)
+
+	_, header, _, _ := rec.snapshot()
+	require.Equal(t, "note__Injected: 1", header.Get(HeaderJobName))
+	require.Equal(t, "7__", header.Get(HeaderJobID))
+	require.Empty(t, header.Get("Injected"), "CRLF in a job name must not inject a header")
+}
+
+func TestHTTP_LongJobNameIsBounded(t *testing.T) {
+	srv, rec := serve(t, http.StatusOK, nil, "")
+	job := testJob(`{}`)
+	job.Name = strings.Repeat("n", 4096)
+
+	_, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), job)
+	require.NoError(t, err)
+
+	_, header, _, _ := rec.snapshot()
+	require.LessOrEqual(t, len(header.Get(HeaderJobName)), headerValueLimit+len("... (truncated)"))
+}
+
+func TestHTTP_ConfiguredHeadersAreValidatedAtBuildTime(t *testing.T) {
+	ctx := context.Background()
+	bc := mkqd.BuildContext{Queue: "q"}
+
+	_, err := newHTTPExecutor(ctx, bc, executorConfig(t, "type: http\nurl: http://x/y\nheaders:\n  \"Bad Name\": v"))
+	require.ErrorContains(t, err, "invalid header name")
+
+	_, err = newHTTPExecutor(ctx, bc, executorConfig(t, "type: http\nurl: http://x/y\nheaders:\n  X-Ok: \"a\\rb\""))
+	require.ErrorContains(t, err, "invalid value for header")
+}
+
+func TestTruncate_CutsOnARuneBoundary(t *testing.T) {
+	// 日本語のエラーメッセージが壊れた UTF-8 になってダッシュボードに
+	// 出ることがないようにする。
+	s := strings.Repeat("あ", 500) // 1500 bytes
+	got := truncate(s, failedReasonLimit)
+	require.True(t, utf8.ValidString(got), "truncated text must stay valid UTF-8")
+	require.True(t, strings.HasSuffix(got, "... (truncated)"))
+	require.LessOrEqual(t, len(got)-len("... (truncated)"), failedReasonLimit)
+}
+
+func TestTruncate_ShortStringIsUntouched(t *testing.T) {
+	require.Equal(t, "ありがとう", truncate("ありがとう", failedReasonLimit))
 }

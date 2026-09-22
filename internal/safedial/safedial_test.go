@@ -20,7 +20,6 @@ func TestIsPublic(t *testing.T) {
 		{"93.184.216.34", true, "ordinary public v4"},
 		{"2606:4700::1111", true, "ordinary public v6"},
 
-		{"0.0.0.0", false, "unspecified"},
 		{"::", false, "unspecified v6"},
 		{"127.0.0.1", false, "loopback"},
 		{"127.1.2.3", false, "loopback range, not just .0.1"},
@@ -47,6 +46,11 @@ func TestIsPublic(t *testing.T) {
 		{"2002:7f00:1::", false, "6to4, embeds v4"},
 		{"100::1", false, "discard-only v6"},
 
+		{"0.0.0.0", false, "unspecified"},
+		{"0.1.2.3", false, "0.0.0.0/8 is \"this network\", not just 0.0.0.0"},
+		{"192.88.99.1", false, "deprecated 6to4 relay anycast"},
+		{"2001:20::1", false, "ORCHIDv2, not routable"},
+
 		// 4-in-6 と NAT64 は、公開アドレスの見た目で private を指せる。
 		{"::ffff:127.0.0.1", false, "IPv4-mapped loopback"},
 		{"::ffff:10.0.0.1", false, "IPv4-mapped private"},
@@ -54,6 +58,10 @@ func TestIsPublic(t *testing.T) {
 		{"64:ff9b::7f00:1", false, "NAT64 wrapping 127.0.0.1"},
 		{"64:ff9b::a00:1", false, "NAT64 wrapping 10.0.0.1"},
 		{"64:ff9b::101:101", true, "NAT64 wrapping 1.1.1.1"},
+		{"64:ff9b:1::7f00:1", false, "RFC 8215 local-use NAT64 wrapping 127.0.0.1"},
+		{"64:ff9b:1::a00:1", false, "RFC 8215 local-use NAT64 wrapping 10.0.0.1"},
+		{"::7f00:1", false, "IPv4-compatible IPv6 wrapping 127.0.0.1"},
+		{"::a00:1", false, "IPv4-compatible IPv6 wrapping 10.0.0.1"},
 	}
 
 	for _, tc := range cases {

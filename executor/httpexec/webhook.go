@@ -70,6 +70,9 @@ func newWebhookExecutor(_ context.Context, bc mkqd.BuildContext, cfg mkqd.Execut
 	if err := cfg.DecodeStrict(&opts); err != nil {
 		return nil, err
 	}
+	if err := checkHeaders(opts.Headers); err != nil {
+		return nil, fmt.Errorf("executor webhook: %w", err)
+	}
 	return &webhookExecutor{
 		opts: opts,
 		snd:  newSender(opts.allowPrivate(), opts.maxResponseBytes(), userAgent(opts.UserAgent), bc.Logger),
@@ -91,6 +94,12 @@ func (e *webhookExecutor) Execute(ctx context.Context, job *mkqd.Job) (any, erro
 		return nil, permanent("job %s: payload is not a webhook payload: %v", job.ID, err)
 	}
 	if err := checkTarget(p.URL); err != nil {
+		return nil, permanent("job %s: %v", job.ID, err)
+	}
+	// net/http は送信時に不正なヘッダを拒否するが、その失敗は transport
+	// エラーとして出てくるので再試行扱いになってしまう。送れないヘッダが
+	// 送れるようになることはないので、ここで恒久的失敗に倒す。
+	if err := checkHeaders(p.Headers); err != nil {
 		return nil, permanent("job %s: %v", job.ID, err)
 	}
 
