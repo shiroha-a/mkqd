@@ -39,10 +39,10 @@ to a Go worker.
 ## Status
 
 Early. The runtime, configuration, typed handlers, executor registry,
-health endpoints and the `run` / `check` / `version` commands work and
-are covered by tests against a real Redis. The HTTP-dispatch, webhook
-and ActivityPub delivery executors, and the inspect / admin
-subcommands, are the next slices — see the roadmap below.
+health endpoints, the `http` and `webhook` executors and the `run` /
+`check` / `version` commands work and are covered by tests. The
+ActivityPub delivery executor and the inspect / admin subcommands are
+the next slices — see the roadmap below.
 
 ## Install
 
@@ -139,12 +139,23 @@ leave the job safe to retry".
 Configuration names an executor type; a factory turns it into running
 work:
 
-| Type | State |
-|---|---|
-| `log` | shipped — records each job and succeeds, for proving the wiring |
-| `http` | planned — forward the job to the application's HTTP endpoint |
-| `webhook` | planned — HMAC-signed POST to a URL carried in the payload |
-| `activitypub_deliver` | planned — HTTP Signature delivery to a remote inbox |
+| Type | State | Package |
+|---|---|---|
+| `log` | shipped — records each job and succeeds, for proving the wiring | built in |
+| `http` | shipped — forward the job to the application's HTTP endpoint | `executor/httpexec` |
+| `webhook` | shipped — HMAC-signed POST to a URL carried in the payload | `executor/httpexec` |
+| `activitypub_deliver` | planned — HTTP Signature delivery to a remote inbox | `executor/apdeliver` |
+
+Executors outside the core live in their own packages so an embedding
+application links only what it uses. The `mkqd` binary links all of
+them; an application embedding the runtime imports what it needs:
+
+```go
+import _ "github.com/shiroha-a/mkqd/executor/httpexec"
+```
+
+Naming a type whose package nobody imported is a startup error that
+tells you which import to add.
 
 An embedding application can register its own:
 
@@ -165,9 +176,100 @@ mkqd.RegisterExecutor("my-thing", func(ctx context.Context, bc mkqd.BuildContext
 Executors see the payload as raw JSON, so one that forwards a job
 elsewhere never pays for a decode it does not need.
 
+## The HTTP dispatch contract
+
+The `http` executor turns a queue into an HTTP endpoint your
+application implements, in any language. mkqd owns the queue, the
+retries and the lock; the application answers one request per attempt.
+
+```yaml
+queues:
+  - name: inbox
+    concurrency: 32
+    executor:
+      type: http
+      url: "http://127.0.0.1:3000/_mkqd/jobs"
+      timeout: 60s
+      secret: "${MKQD_HMAC_SECRET}"
+```
+
+Request:
+
+```
+POST /_mkqd/jobs
+Content-Type: application/json
+User-Agent: mkqd/<version>
+X-Mkqd-Queue: inbox
+X-Mkqd-Job-Id: 42
+X-Mkqd-Job-Name: inbox
+X-Mkqd-Attempt: 2
+X-Mkqd-Timestamp: 1758500000
+X-Mkqd-Signature: v1=<hex hmac-sha256>
+
+{"queue":"inbox","id":"42","name":"inbox","data":{...},
+ "attemptsMade":1,"timestamp":"2026-09-22T10:00:00Z"}
+```
+
+`X-Mkqd-Attempt` is which attempt this is; `attemptsMade` is how many
+already failed. The signature is HMAC-SHA256 over
+`v1:<timestamp>:<body>` keyed by `secret`. Verify it in constant time
+and reject a timestamp more than a few minutes from your own clock.
+Without a `secret` no signature is sent, which is reasonable on
+loopback.
+
+The response decides the job's fate:
+
+| Status | Meaning |
+|---|---|
+| 2xx | success; a JSON body becomes BullMQ's `returnvalue` |
+| 3xx | permanent failure — redirects are not followed |
+| 400, 409, 410, 422 | permanent failure |
+| anything else | retry |
+
+A response header `X-Mkqd-Retry: no` fails the job permanently whatever
+the status says. A JSON body of the form `{"error": "..."}` supplies
+the text shown as the failure reason; otherwise the first kilobyte of
+the body is used.
+
+Unknown statuses retry rather than fail, because losing work is worse
+than one wasted attempt. A permanent failure is not lost either: the
+job lands in the failed set, and `mkqd retry` can send it back once the
+cause is fixed.
+
+**Known limitation.** A `Retry-After` on a 429 is logged but does not
+change the retry delay: mkq's backoff strategy receives only the
+attempt count, so there is nowhere to put a per-job delay. This is
+filed upstream.
+
+## Outbound webhooks
+
+The `webhook` executor takes its destination from the job instead of
+the config, which is what an outbound webhook queue needs:
+
+```json
+{
+  "url": "https://subscriber.example/hook",
+  "secret": "per-subscriber-secret",
+  "headers": {"X-Tier": "pro"},
+  "body": {"event": "note.created"}
+}
+```
+
+`body` is sent verbatim, signed the same way as a dispatch. Because the
+destination comes from the payload, the SSRF guard is on by default
+here: a job naming a loopback, private, link-local, carrier-grade NAT
+or otherwise non-public address is rejected without a request being
+made, and the check runs against the address actually being connected
+to, so a hostname that re-resolves cannot slip past it. The `http`
+executor has the guard off by default, since there the URL comes from
+the operator and pointing it at `127.0.0.1` is the normal case.
+
+Any defect in the payload — no URL, a non-HTTP scheme, malformed JSON —
+fails the job permanently rather than retrying something that cannot
+start working.
+
 ## Roadmap
 
-- `http` / `webhook` executors, with an SSRF-guarded dialer.
 - `activitypub_deliver` and an HTTP Signature package, with file,
   directory and HTTP key stores.
 - Inspect and admin subcommands (`counts`, `list`, `job`, `enqueue`,

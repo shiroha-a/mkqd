@@ -14,6 +14,10 @@ import (
 	"strings"
 
 	"github.com/shiroha-a/mkqd"
+
+	// 設定ファイルから名前で指定できる executor を登録する。
+	// 単体バイナリは組み込みの executor をすべてリンクする。
+	_ "github.com/shiroha-a/mkqd/executor/httpexec"
 )
 
 func main() {
