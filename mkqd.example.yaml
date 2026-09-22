@@ -1,0 +1,51 @@
+# mkqd reference configuration.
+#
+# Every value shown is the built-in default unless noted. ${VAR} and
+# ${VAR:-fallback} are expanded from the environment before parsing; an
+# undefined variable without a fallback is a startup error.
+#
+# Validate a file with:  mkqd check -c mkqd.yaml
+
+redis:
+  addrs: ["127.0.0.1:6379"]
+  db: 0
+  username: ""
+  password: "${REDIS_PASSWORD:-}"
+  # master_name: "mymaster"   # set to use Redis Sentinel
+  # pool_size: 0              # 0 = sum of queue concurrency + 8
+
+# BullMQ key prefix. Must match whatever else shares these queues
+# (bull-board, a BullMQ worker in another language, Misskey).
+key_prefix: "bull"
+
+log:
+  level: info      # debug | info | warn | error
+  format: text     # text | json
+
+server:
+  addr: "127.0.0.1:9464"   # "off" disables /healthz, /readyz and /metrics
+  metrics: true
+
+# How long shutdown waits for cancelled handlers to return.
+shutdown_timeout: 30s
+
+defaults:
+  concurrency: 16
+  lock_duration: 30s
+  stalled_interval: 30s
+  max_stalled_count: 1
+  job_metrics: 0           # > 0 keeps that many one-minute BullMQ metric buckets
+
+queues:
+  # The built-in "log" executor records each job and succeeds. It is the
+  # fastest way to prove the Redis wiring before any handler exists.
+  - name: smoke
+    concurrency: 4
+    executor:
+      type: log
+
+  # A queue consumed by application code registers no executor here;
+  # mkqd.Handle claims it. Tuning still comes from this block.
+  # - name: inbox
+  #   concurrency: 32
+  #   rate_limit: { max: 300, duration: 1s }

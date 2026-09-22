@@ -1,0 +1,13 @@
+# Build output
+/mkqd
+/dist/
+
+# Local operator config
+mkqd.local.yaml
+
+# Working notes (design / task checklists live here per CLAUDE.md)
+.tmp/
+
+# Editor / OS
+.DS_Store
+*.swp
