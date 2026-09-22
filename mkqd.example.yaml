@@ -71,3 +71,16 @@ queues:
   #     type: webhook
   #     timeout: 20s
   #     secret: "${MKQD_WEBHOOK_SECRET:-}"
+
+  # ActivityPub delivery. mkqd signs, digests and delivers; the
+  # application only enqueues. See "ActivityPub delivery" in the README.
+  # - name: deliver
+  #   concurrency: 128
+  #   rate_limit: { max: 300, duration: 1s }
+  #   executor:
+  #     type: activitypub_deliver
+  #     timeout: 30s
+  #     signer:
+  #       type: file        # one actor; use "dir" for one PEM per key id
+  #       key_id: "https://local.example/users/me#main-key"
+  #       private_key_path: /etc/mkqd/actor.pem

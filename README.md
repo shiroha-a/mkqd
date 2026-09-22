@@ -39,10 +39,10 @@ to a Go worker.
 ## Status
 
 Early. The runtime, configuration, typed handlers, executor registry,
-health endpoints, the `http` and `webhook` executors and the `run` /
-`check` / `version` commands work and are covered by tests. The
-ActivityPub delivery executor and the inspect / admin subcommands are
-the next slices — see the roadmap below.
+health endpoints, the `http`, `webhook` and `activitypub_deliver`
+executors and the `run` / `check` / `keys` / `version` commands work and
+are covered by tests. The inspect / admin subcommands are the next
+slice — see the roadmap below.
 
 ## Install
 
@@ -144,7 +144,7 @@ work:
 | `log` | shipped — records each job and succeeds, for proving the wiring | built in |
 | `http` | shipped — forward the job to the application's HTTP endpoint | `executor/httpexec` |
 | `webhook` | shipped — HMAC-signed POST to a URL carried in the payload | `executor/httpexec` |
-| `activitypub_deliver` | planned — HTTP Signature delivery to a remote inbox | `executor/apdeliver` |
+| `activitypub_deliver` | shipped — HTTP Signature delivery to a remote inbox | `executor/apdeliver` |
 
 Executors outside the core live in their own packages so an embedding
 application links only what it uses. The `mkqd` binary links all of
@@ -283,10 +283,98 @@ chooses, honours the environment proxy as usual. Turning
 back on, for the same reason — you have taken the destination decision
 back.
 
+## ActivityPub delivery
+
+The `activitypub_deliver` executor takes federation delivery off the
+application entirely. Enqueue the activity and the inbox; mkqd signs,
+digests, delivers and applies the fediverse's retry conventions.
+
+```json
+{
+  "inbox": "https://remote.example/users/alice/inbox",
+  "keyId": "https://local.example/users/me#main-key",
+  "activity": {"@context": "https://www.w3.org/ns/activitystreams", "type": "Create"}
+}
+```
+
+The request carries `Date`, `Host`, `Digest` and a `Signature` over
+`(request-target) host date digest content-type` — the
+draft-cavage dialect the fediverse actually verifies, rather than the
+RFC 9421 form it mostly does not yet. `keyId` may be omitted when the
+signer has a default, which is the single-actor case.
+
+Use `body` instead of `activity` to fix the exact bytes sent; the two
+are exclusive. Either way the digest is computed over what mkqd
+actually sends, so re-serialisation cannot desynchronise it.
+
+Delivery outcomes follow what the fediverse expects:
+
+| Status | Meaning |
+|---|---|
+| 2xx | delivered |
+| 3xx | permanent failure — a redirected POST cannot carry its signature |
+| 4xx except 401, 408 and 429 | permanent failure |
+| 401, 408, 429, 5xx, network errors | retry |
+
+401 retries where Misskey would give up, following Mastodon instead: an
+inbox answers 401 when signature verification failed, and the usual
+causes — clock skew, or the remote not being able to fetch your key
+endpoint just then — clear on their own. Treating it as permanent means
+a post never federates because the other side had a bad minute.
+
+The inbox comes from the job, so the SSRF guard is on and redirects are
+not followed. A payload that cannot be delivered — no inbox, both
+`activity` and `body`, a header HTTP cannot carry, a key the signer does
+not hold — fails permanently instead of burning attempts.
+
+### Keys stay where they are
+
+The signing interface is "sign these bytes", not "give me the private
+key". An application that embeds mkqd therefore never hands its keys
+over:
+
+```go
+ex, err := apdeliver.New(apdeliver.Options{Signer: appSigner})
+if err != nil {
+    log.Fatal(err)
+}
+rt.HandleExecutor("deliver", ex)
+```
+
+`appSigner` is anything with a `Sign(ctx, keyID, signingString)` method
+— typically a lookup in the same database the actors live in.
+
+A standalone mkqd configures a signer instead:
+
+```yaml
+queues:
+  - name: deliver
+    concurrency: 128
+    rate_limit: { max: 300, duration: 1s }
+    executor:
+      type: activitypub_deliver
+      signer:
+        type: file           # one actor
+        key_id: "https://local.example/users/me#main-key"
+        private_key_path: /etc/mkqd/actor.pem
+```
+
+`type: dir` serves many actors from a directory, one PEM per key id.
+The file is named after a hash of the key id, since a key id is a URL;
+`mkqd keys -dir /etc/mkqd/keys <keyId>` prints where to put it. Parsed
+keys are cached but revalidated against the file on every use, so
+rotating a key in place takes effect without a restart — ActivityPub
+rotation keeps the key id and replaces the material, which a cache with
+no invalidation would never notice.
+
+Neither signer suits a server whose keys live only in its database. A
+remote signer — mkqd sends the string to sign, the application returns
+the signature, the key never moves — is the next slice.
+
 ## Roadmap
 
-- `activitypub_deliver` and an HTTP Signature package, with file,
-  directory and HTTP key stores.
+- A remote signer, so a standalone mkqd can deliver for a multi-user
+  server without ever holding its private keys.
 - Inspect and admin subcommands (`counts`, `list`, `job`, `enqueue`,
   `pause`, `resume`, `retry`, `promote`, `rm`, `drain`).
 - Container image, compose example and an embedded sample application.

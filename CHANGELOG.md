@@ -40,3 +40,15 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fails at startup instead of being ignored.
 - Naming a built-in executor type whose package is not linked now
   reports which import to add.
+- `httpsig`: draft-cavage HTTP Signature signing with a SHA-256 Digest,
+  plus verification that also requires sufficient header coverage and
+  checks the digest against the body. The `Signer` interface signs a
+  string rather than surrendering a key, so an application can sign
+  without its keys leaving the process.
+- `executor/apdeliver`: the `activitypub_deliver` executor — signs,
+  digests and delivers an activity to a remote inbox, classifies the
+  outcome the way the fediverse expects, guards the payload-supplied
+  destination, and refuses to follow redirects. Configured signers:
+  `file` (one actor) and `dir` (one PEM per key id, revalidated on use
+  so an in-place key rotation is picked up without a restart).
+- `mkqd keys` prints where a `dir` signer looks for a key id.

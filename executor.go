@@ -179,16 +179,15 @@ func init() {
 // can name a type whose package nobody imported. Naming the import in
 // the error turns a dead end into a one-line fix.
 var builtinExecutorPackages = map[string]string{
-	"http":    "github.com/shiroha-a/mkqd/executor/httpexec",
-	"webhook": "github.com/shiroha-a/mkqd/executor/httpexec",
+	"http":                "github.com/shiroha-a/mkqd/executor/httpexec",
+	"webhook":             "github.com/shiroha-a/mkqd/executor/httpexec",
+	"activitypub_deliver": "github.com/shiroha-a/mkqd/executor/apdeliver",
 }
 
 // plannedExecutors are types the documentation mentions but that no
 // package implements yet. Pointing at an import that does not compile
 // would be worse than saying so plainly.
-var plannedExecutors = map[string]struct{}{
-	"activitypub_deliver": {},
-}
+var plannedExecutors = map[string]struct{}{}
 
 func unknownExecutorError(typ string) error {
 	if pkg, ok := builtinExecutorPackages[typ]; ok {

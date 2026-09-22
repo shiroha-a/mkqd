@@ -11,12 +11,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/shiroha-a/mkqd"
 
-	// 設定ファイルから名前で指定できる executor を登録する。
-	// 単体バイナリは組み込みの executor をすべてリンクする。
+	// 設定ファイルから名前で指定できる executor を登録する。単体バイナリは
+	// 組み込みの executor をすべてリンクする (apdeliver は keys サブコマンド
+	// でも使うので blank import ではない)。
+	"github.com/shiroha-a/mkqd/executor/apdeliver"
 	_ "github.com/shiroha-a/mkqd/executor/httpexec"
 )
 
@@ -42,6 +45,7 @@ func commands() []command {
 	return []command{
 		{"run", "consume the configured queues until interrupted", cmdRun},
 		{"check", "validate the config, build executors, ping Redis", cmdCheck},
+		{"keys", "print where a dir signer looks for a key id", cmdKeys},
 		{"version", "print the mkqd version", cmdVersion},
 	}
 }
@@ -151,6 +155,26 @@ func keyPrefixDescription(cfg mkqd.Config) string {
 		return "bull (BullMQ default)"
 	}
 	return cfg.KeyPrefix
+}
+
+// cmdKeys answers "where do I put this actor's key?", which a dir
+// signer otherwise makes guesswork: the file is named after a hash of
+// the key id.
+func cmdKeys(args []string) error {
+	fs := flag.NewFlagSet("keys", flag.ContinueOnError)
+	dir := fs.String("dir", "", "the dir signer's directory, to print a full path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: mkqd keys [-dir DIR] <keyId>")
+	}
+	name := apdeliver.KeyFileName(fs.Arg(0))
+	if *dir != "" {
+		name = filepath.Join(*dir, name)
+	}
+	fmt.Println(name)
+	return nil
 }
 
 func cmdVersion(args []string) error {
