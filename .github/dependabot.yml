@@ -1,0 +1,42 @@
+version: 2
+
+# アラートが出てから手で追うのをやめるための設定。
+# PR は既定ブランチ (develop) 宛に来る。
+#
+# minor / patch はまとめて 1 本の PR にする。個別に来ると数が増えるだけで、
+# 見る側が本当に読みたい major を埋もれさせる。major はグループから外して
+# あるので、破壊的変更は単独の PR として届く。
+#
+# **mkq の更新はここを通って来る。** mkqd は mkq を公開モジュールとして
+# require しているので、mkq 側のリリースに追従する PR がこの設定で届く。
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      actions:
+        patterns:
+          - "*"
