@@ -23,17 +23,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/shiroha-a/mkq"
 	"github.com/shiroha-a/mkqd"
-	"github.com/shiroha-a/mkqd/internal/safedial"
+	"github.com/shiroha-a/mkqd/internal/httpsend"
 )
 
 // Request headers mkqd sets on every dispatch.
@@ -51,14 +49,10 @@ const (
 
 const (
 	defaultTimeout          = 30 * time.Second
-	defaultMaxResponseBytes = 64 << 10
+	defaultMaxResponseBytes = httpsend.DefaultMaxResponseBytes
 	// failedReasonLimit caps how much of a response body ends up in
 	// BullMQ's failedReason field, which dashboards render inline.
 	failedReasonLimit = 1 << 10
-	// drainLimit bounds the read-and-discard that lets a connection be
-	// reused. A response with more left over than this loses its
-	// keep-alive, which is the cheaper outcome.
-	drainLimit = 8 << 10
 	// headerValueLimit bounds the job metadata mkqd copies into request
 	// headers, so an oversized job name cannot push a request past a
 	// server's header limit.
@@ -180,39 +174,11 @@ func newSender(allowPrivate bool, maxBytes int64, ua string, log *slog.Logger) *
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &sender{
-		client: &http.Client{
-			Transport: newTransport(allowPrivate),
-			// リダイレクトは追わない。webhook では payload 由来の URL が
-			// SSRF ガードを通った後で private 宛へ飛ばされうるし、http でも
-			// 転送先が署名を検証できる保証がない。3xx はそのまま返して
-			// 設定ミスとして扱う。
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:    httpsend.NewClient(allowPrivate),
 		userAgent: ua,
 		maxBytes:  maxBytes,
 		log:       log,
 	}
-}
-
-// newTransport builds the transport for a sender.
-//
-// **ガードが有効なときは環境変数のプロキシを使わない。** プロキシ経由だと
-// 接続先はプロキシのアドレスになり、safedial が検査するのも同じくプロキシに
-// なるので、本来の宛先に対する保護が丸ごと無効になる。ガードを切っている
-// (= 宛先を運用者が決めている) ときだけ HTTP_PROXY 等を尊重する。
-func newTransport(allowPrivate bool) *http.Transport {
-	t := &http.Transport{
-		DialContext:         safedial.NewDialer(allowPrivate).DialContext,
-		MaxIdleConns:        256,
-		MaxIdleConnsPerHost: 64,
-		IdleConnTimeout:     90 * time.Second,
-	}
-	if allowPrivate {
-		t.Proxy = http.ProxyFromEnvironment
-	}
-	return t
 }
 
 // send posts body and turns the response into a handler outcome.
@@ -252,14 +218,7 @@ func (s *sender) send(ctx context.Context, target string, body []byte, secret st
 		}
 		return nil, fmt.Errorf("mkqd/http: POST %s: %w", target, err)
 	}
-	// 接続を再利用するために残りを読み捨てるが、上限を付ける。
-	// **transport は gzip を自動で展開する。** 無制限に読み捨てると、
-	// 小さな圧縮ストリームが巨大に展開される応答で worker slot と帯域を
-	// timeout いっぱい占有されうる。webhook の宛先は payload 由来 =
-	// 信頼できないので、これは現実的な攻撃面になる。
-	defer func() { _, _ = io.CopyN(io.Discard, resp.Body, drainLimit); _ = resp.Body.Close() }()
-
-	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, s.maxBytes))
+	payload, readErr := httpsend.ReadBody(resp, s.maxBytes)
 	if readErr != nil {
 		return nil, fmt.Errorf("mkqd/http: POST %s: read response: %w", target, readErr)
 	}
@@ -352,24 +311,10 @@ func detail(header http.Header, payload []byte) string {
 			Error string `json:"error"`
 		}
 		if err := json.Unmarshal(trimmed, &obj); err == nil && obj.Error != "" {
-			return truncate(obj.Error, failedReasonLimit)
+			return httpsend.Truncate(obj.Error, failedReasonLimit)
 		}
 	}
-	return truncate(string(trimmed), failedReasonLimit)
-}
-
-// truncate cuts s to at most limit bytes without splitting a rune, so a
-// non-ASCII failure message (a Japanese error from a Misskey endpoint,
-// say) stays valid UTF-8 in the dashboard.
-func truncate(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
-	cut := limit
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
-	return s[:cut] + "... (truncated)"
+	return httpsend.Truncate(string(trimmed), failedReasonLimit)
 }
 
 // sanitizeHeaderValue makes an arbitrary string safe to put in a header
@@ -377,7 +322,7 @@ func truncate(s string, limit int) string {
 // the length.
 func sanitizeHeaderValue(v string) string {
 	if len(v) > headerValueLimit {
-		v = truncate(v, headerValueLimit)
+		v = httpsend.Truncate(v, headerValueLimit)
 	}
 	var b strings.Builder
 	for i := 0; i < len(v); i++ {

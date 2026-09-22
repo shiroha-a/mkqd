@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/stretchr/testify/require"
 
@@ -463,18 +462,4 @@ func TestHTTP_ConfiguredHeadersAreValidatedAtBuildTime(t *testing.T) {
 
 	_, err = newHTTPExecutor(ctx, bc, executorConfig(t, "type: http\nurl: http://x/y\nheaders:\n  X-Ok: \"a\\rb\""))
 	require.ErrorContains(t, err, "invalid value for header")
-}
-
-func TestTruncate_CutsOnARuneBoundary(t *testing.T) {
-	// 日本語のエラーメッセージが壊れた UTF-8 になってダッシュボードに
-	// 出ることがないようにする。
-	s := strings.Repeat("あ", 500) // 1500 bytes
-	got := truncate(s, failedReasonLimit)
-	require.True(t, utf8.ValidString(got), "truncated text must stay valid UTF-8")
-	require.True(t, strings.HasSuffix(got, "... (truncated)"))
-	require.LessOrEqual(t, len(got)-len("... (truncated)"), failedReasonLimit)
-}
-
-func TestTruncate_ShortStringIsUntouched(t *testing.T) {
-	require.Equal(t, "ありがとう", truncate("ありがとう", failedReasonLimit))
 }

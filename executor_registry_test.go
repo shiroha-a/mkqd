@@ -7,15 +7,20 @@ import (
 )
 
 // A type the docs mention but no package implements must say so, rather
-// than point at an import that would not compile.
+// than point at an import that would not compile. Nothing is in that
+// state right now, so the branch is exercised through the table.
 func TestUnknownExecutorError_DistinguishesPlannedFromUnlinked(t *testing.T) {
-	require.ErrorContains(t, unknownExecutorError("activitypub_deliver"), "not implemented yet")
-	require.NotContains(t, unknownExecutorError("activitypub_deliver").Error(), "import _",
+	plannedExecutors["not-yet"] = struct{}{}
+	t.Cleanup(func() { delete(plannedExecutors, "not-yet") })
+
+	require.ErrorContains(t, unknownExecutorError("not-yet"), "not implemented yet")
+	require.NotContains(t, unknownExecutorError("not-yet").Error(), "import _",
 		"an unimplemented type must not suggest an import path")
 
-	require.ErrorContains(t, unknownExecutorError("http"),
-		"github.com/shiroha-a/mkqd/executor/httpexec")
-	require.ErrorContains(t, unknownExecutorError("http"), "import _")
+	for _, typ := range []string{"http", "webhook", "activitypub_deliver"} {
+		require.ErrorContains(t, unknownExecutorError(typ), "import _")
+		require.ErrorContains(t, unknownExecutorError(typ), builtinExecutorPackages[typ])
+	}
 
 	require.ErrorContains(t, unknownExecutorError("nonsense"), "unknown executor type")
 }
