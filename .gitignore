@@ -8,6 +8,9 @@ mkqd.local.yaml
 # Working notes (design / task checklists live here per CLAUDE.md)
 .tmp/
 
+# Coding-agent local index (regenerated, machine-specific)
+.serena/
+
 # Editor / OS
 .DS_Store
 *.swp
