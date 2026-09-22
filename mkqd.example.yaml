@@ -49,3 +49,25 @@ queues:
   # - name: inbox
   #   concurrency: 32
   #   rate_limit: { max: 300, duration: 1s }
+
+  # Sidecar shape: mkqd owns the queue, the application answers one
+  # HTTP request per attempt. See "The HTTP dispatch contract" in the
+  # README for the request, the signature and the response rules.
+  # - name: inbox
+  #   concurrency: 32
+  #   executor:
+  #     type: http
+  #     url: "http://127.0.0.1:3000/_mkqd/jobs"
+  #     timeout: 60s
+  #     secret: "${MKQD_HMAC_SECRET}"
+  #     # The URL is yours, so loopback is allowed by default.
+  #     # allow_private_network: true
+
+  # Outbound webhooks: the destination arrives in the job payload, so
+  # the SSRF guard is on unless you turn it off.
+  # - name: webhook
+  #   concurrency: 16
+  #   executor:
+  #     type: webhook
+  #     timeout: 20s
+  #     secret: "${MKQD_WEBHOOK_SECRET:-}"

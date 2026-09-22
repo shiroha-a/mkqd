@@ -172,3 +172,32 @@ func init() {
 		}), nil
 	})
 }
+
+// builtinExecutorPackages maps the executor types mkqd ships to the
+// package that registers them. They live in sub-packages so that an
+// embedding application links only what it uses, which means a config
+// can name a type whose package nobody imported. Naming the import in
+// the error turns a dead end into a one-line fix.
+var builtinExecutorPackages = map[string]string{
+	"http":    "github.com/shiroha-a/mkqd/executor/httpexec",
+	"webhook": "github.com/shiroha-a/mkqd/executor/httpexec",
+}
+
+// plannedExecutors are types the documentation mentions but that no
+// package implements yet. Pointing at an import that does not compile
+// would be worse than saying so plainly.
+var plannedExecutors = map[string]struct{}{
+	"activitypub_deliver": {},
+}
+
+func unknownExecutorError(typ string) error {
+	if pkg, ok := builtinExecutorPackages[typ]; ok {
+		return fmt.Errorf("executor type %q is built in but not linked; add `import _ %q` (registered: %v)",
+			typ, pkg, RegisteredExecutors())
+	}
+	if _, ok := plannedExecutors[typ]; ok {
+		return fmt.Errorf("executor type %q is not implemented yet in mkqd %s (registered: %v)",
+			typ, Version, RegisteredExecutors())
+	}
+	return fmt.Errorf("unknown executor type %q (registered: %v)", typ, RegisteredExecutors())
+}

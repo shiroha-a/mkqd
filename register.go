@@ -275,8 +275,7 @@ func (rt *Runtime) buildConfiguredQueues(ctx context.Context) error {
 		}
 		factory, ok := lookupExecutorFactory(qc.Executor.Type)
 		if !ok {
-			return fmt.Errorf("mkqd: queue %q: unknown executor type %q (known: %v)",
-				qc.Name, qc.Executor.Type, RegisteredExecutors())
+			return fmt.Errorf("mkqd: queue %q: %w", qc.Name, unknownExecutorError(qc.Executor.Type))
 		}
 		bc := BuildContext{
 			Queue:  qc.Name,

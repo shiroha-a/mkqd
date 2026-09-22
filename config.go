@@ -2,7 +2,9 @@ package mkqd
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -124,13 +126,47 @@ func (e *ExecutorConfig) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// Decode unmarshals the executor-specific options into v. It is the
-// entry point an ExecutorFactory uses to read its own configuration.
+// Decode unmarshals the executor-specific options into v, ignoring keys
+// the target does not declare.
 func (e ExecutorConfig) Decode(v any) error {
 	if e.node == nil {
 		return nil
 	}
 	return e.node.Decode(v)
+}
+
+// DecodeStrict is Decode with unknown keys rejected, which turns a typo
+// in an executor's options into a startup error instead of a silently
+// ignored setting. It is what an ExecutorFactory should reach for.
+//
+// "type" は runtime 側のキーで executor の option 構造体には属さないため、
+// 検査の前に取り除く。そうしないと全 option 構造体に Type フィールドを
+// 生やさせることになる。
+func (e ExecutorConfig) DecodeStrict(v any) error {
+	if e.node == nil {
+		return nil
+	}
+	n := *e.node
+	if n.Kind == yaml.MappingNode {
+		kept := make([]*yaml.Node, 0, len(n.Content))
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			if n.Content[i].Value == "type" {
+				continue
+			}
+			kept = append(kept, n.Content[i], n.Content[i+1])
+		}
+		n.Content = kept
+	}
+	raw, err := yaml.Marshal(&n)
+	if err != nil {
+		return err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(raw))
+	dec.KnownFields(true)
+	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // Duration is a time.Duration that unmarshals from a YAML string such
