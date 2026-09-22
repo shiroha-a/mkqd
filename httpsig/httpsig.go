@@ -100,8 +100,8 @@ func SignRequest(ctx context.Context, req *http.Request, body []byte, keyID stri
 	if err != nil {
 		return err
 	}
-	if sig.KeyID == "" {
-		return errors.New("httpsig: signer returned no key id")
+	if err := validateKeyID(sig.KeyID); err != nil {
+		return err
 	}
 	algorithm := sig.Algorithm
 	if algorithm == "" {
@@ -113,6 +113,33 @@ func SignRequest(ctx context.Context, req *http.Request, body []byte, keyID stri
 		sig.KeyID, algorithm, strings.Join(DefaultHeaders, " "),
 		base64.StdEncoding.EncodeToString(sig.Bytes),
 	))
+	return nil
+}
+
+// keyIDLimit bounds the key id that goes into the Signature header.
+const keyIDLimit = 512
+
+// validateKeyID rejects a key id that cannot safely appear in the
+// Signature header.
+//
+// **鍵 ID は必ずしも信用できる出所から来ない。** remote signer なら相手の
+// 応答、単一アクター構成でなければ job payload が由来になりうる。ヘッダは
+// keyId="..." という引用付きで組み立てるので、二重引用符や制御文字が入ると
+// 署名パラメータを書き換えられるか、net/http が送信時に拒否して恒久的に
+// 送れないジョブが再試行を焼き続ける。
+func validateKeyID(id string) error {
+	if id == "" {
+		return errors.New("httpsig: signer returned no key id")
+	}
+	if len(id) > keyIDLimit {
+		return fmt.Errorf("httpsig: key id is %d bytes, over the %d limit", len(id), keyIDLimit)
+	}
+	for i := 0; i < len(id); i++ {
+		switch b := id[i]; {
+		case b < 0x20, b == 0x7f, b == '"', b == '\\':
+			return fmt.Errorf("httpsig: key id %q contains a character that cannot appear in a Signature header", id)
+		}
+	}
 	return nil
 }
 

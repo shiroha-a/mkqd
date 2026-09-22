@@ -8,12 +8,22 @@
 package httpsend
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
 	"github.com/shiroha-a/mkqd/internal/safedial"
+)
+
+// Headers mkqd sets on a request it authenticates to the application.
+const (
+	HeaderTimestamp = "X-Mkqd-Timestamp"
+	HeaderSignature = "X-Mkqd-Signature"
 )
 
 const (
@@ -80,4 +90,20 @@ func Truncate(s string, limit int) string {
 		cut--
 	}
 	return s[:cut] + "... (truncated)"
+}
+
+// SignHMAC returns the X-Mkqd-Signature value for a request body: an
+// HMAC-SHA256 over "v1:<unix timestamp>:<body>".
+//
+// The timestamp is inside the signed material so a captured request
+// cannot be replayed indefinitely; receivers should reject a timestamp
+// outside a few minutes of their own clock and compare in constant
+// time.
+func SignHMAC(secret string, unixSeconds int64, body []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte("v1:"))
+	mac.Write([]byte(strconv.FormatInt(unixSeconds, 10)))
+	mac.Write([]byte(":"))
+	mac.Write(body)
+	return "v1=" + hex.EncodeToString(mac.Sum(nil))
 }

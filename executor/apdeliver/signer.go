@@ -29,9 +29,11 @@ type Config struct {
 //
 // An embedding application does not use this: it passes a Signer to New
 // and its keys never leave the process. The configured signers are for
-// deployments where mkqd runs on its own.
+// deployments where mkqd runs on its own — and "remote" keeps that
+// property there too, by asking the application to sign rather than
+// asking it for the key.
 type SignerConfig struct {
-	// Type is "file" or "dir".
+	// Type is "file", "dir" or "remote".
 	Type string `yaml:"type"`
 	// KeyID is the key id a "file" signer advertises. Required there.
 	KeyID string `yaml:"key_id"`
@@ -39,6 +41,18 @@ type SignerConfig struct {
 	PrivateKeyPath string `yaml:"private_key_path"`
 	// Path is the directory a "dir" signer reads keys from.
 	Path string `yaml:"path"`
+	// URL is the signing endpoint a "remote" signer posts to.
+	URL string `yaml:"url"`
+	// Secret keys the HMAC that authenticates mkqd to that endpoint.
+	// Empty sends no signature and is logged as a warning: an
+	// unauthenticated signing endpoint will sign anything for anyone
+	// who can reach it.
+	Secret string `yaml:"secret"`
+	// Timeout bounds one signing call. Zero means 5s.
+	Timeout mkqd.Duration `yaml:"timeout"`
+	// AllowPrivateNetwork defaults to true for "remote": the endpoint
+	// is the operator's own and loopback is the normal case.
+	AllowPrivateNetwork *bool `yaml:"allow_private_network"`
 }
 
 func init() {
@@ -53,6 +67,13 @@ func newExecutor(_ context.Context, bc mkqd.BuildContext, raw mkqd.ExecutorConfi
 	signer, err := BuildSigner(cfg.Signer)
 	if err != nil {
 		return nil, fmt.Errorf("executor activitypub_deliver: %w", err)
+	}
+	// 署名エンドポイントに認証が無いと、そこへ到達できるものは誰でも任意の
+	// バイト列に任意のアクターの鍵で署名させられる。loopback 限定の構成なら
+	// 成り立つが、黙って通すには重すぎるので必ず知らせる。
+	if cfg.Signer.Type == "remote" && cfg.Signer.Secret == "" {
+		bc.Logger.Warn("remote signer has no secret; anything that can reach the endpoint can have arbitrary bytes signed",
+			"url", cfg.Signer.URL)
 	}
 	return New(Options{
 		Signer:              signer,
@@ -71,10 +92,12 @@ func BuildSigner(cfg SignerConfig) (httpsig.Signer, error) {
 		return newFileSigner(cfg)
 	case "dir":
 		return newDirSigner(cfg)
+	case "remote":
+		return newRemoteSigner(cfg)
 	case "":
-		return nil, errors.New("signer.type is required (file or dir)")
+		return nil, errors.New("signer.type is required (file, dir or remote)")
 	default:
-		return nil, fmt.Errorf("unknown signer type %q (known: file, dir)", cfg.Type)
+		return nil, fmt.Errorf("unknown signer type %q (known: file, dir, remote)", cfg.Type)
 	}
 }
 

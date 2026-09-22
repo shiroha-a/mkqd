@@ -84,3 +84,13 @@ queues:
   #       type: file        # one actor; use "dir" for one PEM per key id
   #       key_id: "https://local.example/users/me#main-key"
   #       private_key_path: /etc/mkqd/actor.pem
+  #
+  #     # Keys only in your database? Sign there instead of exporting
+  #     # them. mkqd sends the string to sign and gets the signature back.
+  #     signer:
+  #       type: remote
+  #       url: "http://127.0.0.1:3000/_mkqd/sign"
+  #       # 既定値を付けない形にしてある。未設定なら起動時にエラーになり、
+  #       # 認証なしの署名エンドポイントを黙って晒すことがない。
+  #       secret: "${MKQD_SIGNER_SECRET}"
+  #       timeout: 5s

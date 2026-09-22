@@ -18,9 +18,6 @@ package httpexec
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -40,8 +37,8 @@ const (
 	HeaderJobID     = "X-Mkqd-Job-Id"
 	HeaderJobName   = "X-Mkqd-Job-Name"
 	HeaderAttempt   = "X-Mkqd-Attempt"
-	HeaderTimestamp = "X-Mkqd-Timestamp"
-	HeaderSignature = "X-Mkqd-Signature"
+	HeaderTimestamp = httpsend.HeaderTimestamp
+	HeaderSignature = httpsend.HeaderSignature
 	// HeaderRetry is a response header: "no" fails the job for good
 	// whatever the status code says.
 	HeaderRetry = "X-Mkqd-Retry"
@@ -395,12 +392,7 @@ func checkHeaders(h map[string]string) error {
 // outside a few minutes of their own clock and compare in constant
 // time.
 func Sign(secret string, unixSeconds int64, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte("v1:"))
-	mac.Write([]byte(strconv.FormatInt(unixSeconds, 10)))
-	mac.Write([]byte(":"))
-	mac.Write(body)
-	return "v1=" + hex.EncodeToString(mac.Sum(nil))
+	return httpsend.SignHMAC(secret, unixSeconds, body)
 }
 
 // isReservedHeader reports whether a configured header would clobber
