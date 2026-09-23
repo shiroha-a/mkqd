@@ -597,7 +597,13 @@ go run ./examples/embedded
 ```sh
 go test ./... -race          # needs Redis on 127.0.0.1:6379, or MKQD_TEST_REDIS_ADDR
 go run ./cmd/mkqd check -c mkqd.example.yaml
+golangci-lint run ./...      # CI gate; see .golangci.yml
 ```
+
+`go run <pkg>@<version>` picks its toolchain from the tool's own `go`
+directive, not this module's, so running a pinned tool that way needs
+`GOTOOLCHAIN=go$(awk '/^go [0-9]/ {print $2; exit}' go.mod)`. The
+workflows do this already.
 
 Contributions follow `CLAUDE.md`: branch off `develop`, one issue per
 change, no direct commits to `main`.
