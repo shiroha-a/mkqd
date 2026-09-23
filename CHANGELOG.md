@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Go 1.27.1, matching mkq. The `go` directive moves with it, so an
+  application embedding mkqd needs a 1.27 toolchain: a module declaring
+  `go 1.27.1` cannot be built by an older one.
+
 ### Added
 
 - Runtime: `New` / `NewFromFile` / `Start` / `Run` / `Shutdown` / `Check`,

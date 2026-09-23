@@ -50,7 +50,7 @@ slice — see the roadmap below.
 go install github.com/shiroha-a/mkqd/cmd/mkqd@latest
 ```
 
-Requires Go 1.26+ and Redis 7+ (the same floor as mkq).
+Requires Go 1.27+ and Redis 7+ (the same floor as mkq).
 
 ## Configuration
 
