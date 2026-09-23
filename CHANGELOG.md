@@ -8,6 +8,28 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `Dockerfile`: distroless static, non-root (uid 65532), one binary at
+  ~23MB. `MKQD_CONFIG` defaults to `/etc/mkqd/mkqd.yaml`, and
+  `--build-arg VERSION=` stamps `mkqd version` at link time.
+
+- `deploy/`: a compose stack of Redis, mkqd and bull-board. bull-board
+  is the stock BullMQ dashboard pointed at the keys mkqd writes, so the
+  stack is a check on the wire-format claim rather than an illustration
+  of it.
+
+  `stop_grace_period` is `shutdown_timeout` + 5s. A SIGKILL landing
+  during the unwind puts the job back into stalled recovery, which is
+  what the drain exists to prevent; compose's default of 10s is not
+  enough.
+
+  The dashboard declares `ioredis` explicitly: **BullMQ 6 moved it from
+  a hard dependency to an optional peer dependency**, and npm does not
+  install those on its own. Without it `new Queue(...)` fails at
+  startup. mkq's own interop harness is affected too (shiroha-a/mkq#108).
+
+- `examples/embedded`: the README's opening snippet as a runnable
+  program, against a throwaway key prefix.
+
 - Admin commands: `mkqd enqueue`, `pause`, `resume`, `retry`, `promote`,
   `rm` and `drain`, each with `--json`.
 

@@ -1,0 +1,65 @@
+# mkqd + Redis + bull-board.
+#
+# bull-board is here to be checked, not decorated with: it is a plain
+# BullMQ dashboard reading the same Redis keys mkqd writes. If mkqd
+# ever drifted from BullMQ's wire format, this stack would stop
+# rendering.
+#
+#   docker compose up --build
+#   docker compose run --rm mkqd enqueue smoke '{"hello":"world"}'
+#   open http://127.0.0.1:3000
+#
+# The job appears in bull-board, then moves to completed as the log
+# executor picks it up.
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mkqd:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./mkqd.yaml:/etc/mkqd/mkqd.yaml:ro
+    ports:
+      - "127.0.0.1:9464:9464"
+    # **shutdown_timeout + 5 秒。** mkqd は SIGTERM で in-flight を完走させ、
+    # 猶予切れの場合だけ cancel して巻き取りを 5 秒待つ。その巻き取りの途中で
+    # SIGKILL が落ちると、ジョブは active に lock されたまま残り stalled
+    # recovery が再配送する — drain が避けたかったことがそのまま起きる。
+    # compose の既定は 10 秒で、これには足りない。
+    stop_grace_period: 35s
+    healthcheck:
+      # distroless に shell は無いので CMD で直接叩く。`mkqd check` は
+      # 設定を読んで executor を組み立て Redis に ping するので、
+      # 「起動したが設定が壊れている」を healthy にしない。
+      test: ["CMD", "/usr/local/bin/mkqd", "check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  bullboard:
+    build:
+      context: ./bullboard
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      # mkqd.yaml の key_prefix と揃っていること。ずれると空のダッシュ
+      # ボードが出るだけで、原因が分かりにくい。
+      BULL_PREFIX: bull
+      BULL_QUEUES: smoke
+    ports:
+      - "127.0.0.1:3000:3000"

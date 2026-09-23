@@ -504,10 +504,57 @@ impersonate any actor. Write it as `"${MKQD_SIGNER_SECRET}"` without a
 `:-` fallback so an unset variable fails at startup rather than
 silently disabling authentication.
 
+## Docker
+
+```sh
+docker build -t mkqd:dev .
+docker run --rm -v "$PWD/mkqd.yaml:/etc/mkqd/mkqd.yaml:ro" mkqd:dev
+```
+
+Distroless static base, non-root (uid 65532), one binary, ~23MB. The
+image reads `MKQD_CONFIG` (default `/etc/mkqd/mkqd.yaml`), so every
+subcommand works without repeating `-c`:
+
+```sh
+docker run --rm -v "$PWD/mkqd.yaml:/etc/mkqd/mkqd.yaml:ro" mkqd:dev counts
+```
+
+Pass `--build-arg VERSION=1.2.3` to stamp `mkqd version`; without it the
+binary keeps the in-development marker from `version.go`.
+
+### Compose
+
+`deploy/` brings up Redis, mkqd and **bull-board** together:
+
+```sh
+cd deploy
+docker compose up --build
+docker compose run --rm mkqd enqueue smoke '{"hello":"world"}'
+open http://127.0.0.1:3000
+```
+
+bull-board is there to be checked, not decorated with. It is the stock
+BullMQ dashboard reading the same Redis keys mkqd writes — if mkqd ever
+drifted from BullMQ's wire format, the stack would stop rendering.
+
+**`stop_grace_period` is `shutdown_timeout` + 5s**, for the reason in
+[Shutdown](#shutdown): a SIGKILL landing during the unwind puts the job
+back into stalled recovery, which is what the drain exists to prevent.
+Compose's default of 10s is not enough.
+
+## Embedded example
+
+`examples/embedded` is the README's opening snippet as something you can
+run — a typed handler, a producer and the runtime, against a throwaway
+key prefix:
+
+```sh
+go run ./examples/embedded
+```
+
 ## Roadmap
 
 - Honouring a 429's `Retry-After` on the next retry delay.
-- Container image, compose example and an embedded sample application.
 
 ## Development
 

@@ -1,0 +1,17 @@
+{
+  "name": "mkqd-bullboard",
+  "version": "0.0.0",
+  "private": true,
+  "description": "BullMQ dashboard for the mkqd compose stack. Reads the queues mkqd writes.",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@bull-board/api": "9.10.1",
+    "@bull-board/express": "9.10.1",
+    "bullmq": "6.3.8",
+    "express": "5.2.1",
+    "ioredis": "5.10.1"
+  }
+}
