@@ -6,9 +6,17 @@
 //	mkqd counts [queue...]              job counts per bucket
 //	mkqd list   <queue> <bucket>        list the jobs in one bucket
 //	mkqd job    <queue> <jobId>         show one job in full
+//	mkqd enqueue <queue> '<json>'       add a job
+//	mkqd pause / resume <queue>         stop / restart handing out jobs
+//	mkqd retry / promote / rm <queue> <jobId>
+//	mkqd drain  <queue> --yes           DELETE the queued jobs
 //	mkqd version                        print the build version
 //
-// The read-only commands take --json for scripted use.
+// Every queue command takes --json for scripted use.
+//
+// `mkqd drain` is not the drain Run does on shutdown: that one lets
+// in-flight jobs finish and deletes nothing, this one deletes the
+// pending backlog.
 package main
 
 import (
@@ -55,6 +63,13 @@ func commands() []command {
 		{"counts", "job counts per bucket, for one queue or all", cmdCounts},
 		{"list", "list the jobs in one bucket of a queue", cmdList},
 		{"job", "show one job with its state and logs", cmdJob},
+		{"enqueue", "add a job from a JSON payload", cmdEnqueue},
+		{"pause", "stop handing jobs to workers", cmdPause},
+		{"resume", "let workers take jobs again", cmdResume},
+		{"retry", "move a failed job back to wait", cmdRetry},
+		{"promote", "run a delayed job now", cmdPromote},
+		{"rm", "delete one job", cmdRm},
+		{"drain", "DELETE the queued jobs (not the shutdown drain)", cmdDrain},
 		{"keys", "print where a dir signer looks for a key id", cmdKeys},
 		{"version", "print the mkqd version", cmdVersion},
 	}
@@ -84,7 +99,7 @@ func usage() {
 	b.WriteString("mkqd — standalone worker for mkq / BullMQ-compatible queues\n\n")
 	b.WriteString("usage: mkqd <command> [flags]\n\n")
 	for _, c := range commands() {
-		fmt.Fprintf(&b, "  %-8s %s\n", c.name, c.summary)
+		fmt.Fprintf(&b, "  %-9s %s\n", c.name, c.summary)
 	}
 	b.WriteString("\nrun `mkqd <command> -h` for the flags of a command.\n")
 	fmt.Fprint(os.Stderr, b.String())

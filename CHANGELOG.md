@@ -8,6 +8,29 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Admin commands: `mkqd enqueue`, `pause`, `resume`, `retry`, `promote`,
+  `rm` and `drain`, each with `--json`.
+
+  **`mkqd drain` is not the drain `mkqd run` does on shutdown.** That
+  one lets in-flight jobs finish and deletes nothing; this one deletes
+  the queued backlog. The names collide because the command follows
+  mkq's `DrainPending`, so the command requires `--yes`, says which
+  drain it is when refused, and prints what it actually removed:
+
+  ```
+  $ mkqd drain deliver --yes
+  drained deliver: wait=120 prioritized=3
+  ```
+
+  It removes `wait`, `paused` and `prioritized`; `delayed` only with
+  `-delayed`, and scheduler iterations survive even then. Active and
+  finished jobs are untouched.
+
+  `enqueue` refuses a queue that does not exist unless `--create` is
+  passed, for the same reason the read-only commands do: a typo would
+  otherwise bury the job in a queue nothing works. It is the only
+  command allowed to create one.
+
 - Read-only inspect commands: `mkqd queues`, `mkqd counts`, `mkqd list`
   and `mkqd job`, each with `--json`. They open Redis but start no
   worker, so they are safe to point at a running deployment.
