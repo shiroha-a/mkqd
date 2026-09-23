@@ -166,6 +166,16 @@ func (r resolved) workerOptions(queue string) []mkq.WorkerOption {
 	return opts
 }
 
+// workerOptionsFor is workerOptions plus the runtime-level hooks that
+// every queue gets regardless of its tuning.
+func (rt *Runtime) workerOptionsFor(r resolved, queue string) []mkq.WorkerOption {
+	// **Retry-After は全キューで尊重する。** 相手が「いつ来い」と言っている
+	// のに指数バックオフの都合で早く叩き直す理由が無い。口を出すのは executor
+	// が RetryAfterError を返したときだけで、それ以外は設定どおりの backoff に
+	// 委ねられるので、オプトインにする意味が薄い。
+	return append(r.workerOptions(queue), mkq.WithRetryDelayOverride(rt.retryDelay))
+}
+
 // starter launches the mkq worker for one registered queue. The
 // closure is what erases the payload type: Handle[T] captures T here,
 // executor-backed queues pin it to json.RawMessage, and the Runtime

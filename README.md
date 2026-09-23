@@ -39,11 +39,13 @@ to a Go worker.
 
 ## Status
 
-Early. The runtime, configuration, typed handlers, executor registry,
-health endpoints, the `http`, `webhook` and `activitypub_deliver`
-executors and the `run` / `check` / `keys` / `version` commands work and
-are covered by tests. The inspect / admin subcommands are the next
-slice — see the roadmap below.
+Early, but everything documented here works and is covered by tests:
+the runtime, configuration, typed handlers, executor registry, health
+endpoints, the `http`, `webhook` and `activitypub_deliver` executors,
+and the full command set — `run`, `check`, the inspect commands
+(`queues`, `counts`, `list`, `job`) and the admin ones (`enqueue`,
+`pause`, `resume`, `retry`, `promote`, `rm`, `drain`), plus `keys` and
+`version`.
 
 ## Install
 
@@ -262,6 +264,42 @@ mkqd.RegisterExecutor("my-thing", func(ctx context.Context, bc mkqd.BuildContext
 Executors see the payload as raw JSON, so one that forwards a job
 elsewhere never pays for a decode it does not need.
 
+## Retry-After
+
+A server that answers 429 or 503 often says when to come back. Ignoring
+it means retrying too early — which the remote rejects again — or too
+late, once an exponential curve has overshot. Both executors read the
+header and hand the delay to the runtime, which uses it for that one
+retry instead of the configured backoff:
+
+```
+Retry-After: 900                              # delta-seconds
+Retry-After: Wed, 21 Oct 2026 07:28:00 GMT    # HTTP-date
+```
+
+Both RFC 9110 forms are accepted. A missing, unparseable or already-past
+value changes nothing and the configured backoff stands; a value that
+was present but unusable is logged at debug level, which is the only
+trace of it — nothing reaches the runtime to be logged there. **The delay is
+capped at one hour**, so a remote answering `Retry-After: 86400` cannot
+park a job for a day per attempt. The cap holds whatever the size: a
+value too large to be a duration is treated as "very long" and capped
+like any other, never wrapped into a short one.
+
+The header only moves the delay; it never decides whether to retry at
+all. A permanent failure stays permanent, and `mkq.ErrUnrecoverable`
+still means "do not retry" when a delay rides along with it.
+
+A custom executor gets the same treatment by wrapping its error:
+
+```go
+return nil, mkqd.RetryAfter(90*time.Second, fmt.Errorf("upstream is throttling"))
+```
+
+`mkqd.ParseRetryAfter` is exported for executors that have an HTTP
+response in hand. `RetryAfter` returns the error untouched when the
+delay is not positive, so there is no need to guard the call.
+
 ## The HTTP dispatch contract
 
 The `http` executor turns a queue into an HTTP endpoint your
@@ -322,10 +360,8 @@ than one wasted attempt. A permanent failure is not lost either: the
 job lands in the failed set, and `mkqd retry` can send it back once the
 cause is fixed.
 
-**Known limitation.** A `Retry-After` on a 429 is logged but does not
-change the retry delay: mkq's backoff strategy receives only the
-attempt count, so there is nowhere to put a per-job delay. This is
-filed upstream.
+A `Retry-After` on a retryable response sets that job's next delay in
+place of the configured backoff. See [Retry-After](#retry-after).
 
 ## Outbound webhooks
 
@@ -407,6 +443,10 @@ inbox answers 401 when signature verification failed, and the usual
 causes — clock skew, or the remote not being able to fetch your key
 endpoint just then — clear on their own. Treating it as permanent means
 a post never federates because the other side had a bad minute.
+
+A `Retry-After` from the remote sets that job's next delay in place of
+the configured backoff, which is what a rate-limited instance is asking
+for. See [Retry-After](#retry-after).
 
 The inbox comes from the job, so the SSRF guard is on and redirects are
 not followed. A payload that cannot be delivered — no inbox, both
@@ -551,10 +591,6 @@ key prefix:
 ```sh
 go run ./examples/embedded
 ```
-
-## Roadmap
-
-- Honouring a 429's `Retry-After` on the next retry delay.
 
 ## Development
 

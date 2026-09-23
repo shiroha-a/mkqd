@@ -195,22 +195,26 @@ func (e *Executor) Execute(ctx context.Context, job *mkqd.Job) (any, error) {
 		return nil, fmt.Errorf("apdeliver: POST %s: read response: %w", p.Inbox, readErr)
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			// mkq の backoff はジョブ文脈を受け取らないため、この値を
-			// 次回遅延に反映する口がない。運用者が気づけるようログに残す。
-			e.log.Warn("Retry-After is not applied to the retry delay",
-				"job_id", job.ID, "inbox", p.Inbox, "retry_after", ra)
-		}
-	}
-
 	switch classify(resp.StatusCode) {
 	case outcomeSuccess:
 		return nil, nil
 	case outcomePermanent:
 		return nil, permanent("POST %s: %s: %s", p.Inbox, resp.Status, detail(payload))
 	default:
-		return nil, fmt.Errorf("apdeliver: POST %s: %s: %s", p.Inbox, resp.Status, detail(payload))
+		err := fmt.Errorf("apdeliver: POST %s: %s: %s", p.Inbox, resp.Status, detail(payload))
+		// **相手が「いつ来い」と言っているなら従う。** 連合先が 429 や 503 で
+		// Retry-After を返すのは珍しくなく、指数バックオフの都合で早く叩き直す
+		// のは相手にも自分にも損。runtime が取り出して遅延に使う。
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if d, ok := mkqd.ParseRetryAfter(ra, time.Now()); ok {
+				return nil, mkqd.RetryAfter(d, err)
+			}
+			// 読めなかったことは runtime からは見えない (そこには何も
+			// 届かないため)。連合先が独自形式を返しているのを見つける口。
+			e.log.Debug("ignoring an unusable Retry-After",
+				"job_id", job.ID, "inbox", p.Inbox, "retry_after", ra)
+		}
+		return nil, err
 	}
 }
 
