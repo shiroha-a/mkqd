@@ -6,6 +6,10 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-23
+
+Honours a remote's `Retry-After`. Requires **mkq 1.3.0**.
+
 ### Added
 
 - A remote's `Retry-After` now sets that job's next retry delay in place
@@ -29,6 +33,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Requires **mkq 1.3.0**, for `WithRetryDelayOverride`. The previous
   release built against mkq 1.1.1.
+
+- The published image pins its build stage to the same Go patch release
+  as `go.mod` (`golang:1.27.1`, not the floating `golang:1.27`). A
+  floating tag changes under the build, and govulncheck reads `go.mod`
+  rather than the Dockerfile — so a drift here would leave CI green
+  while the shipped image went stale. CI now checks the two agree.
 
 ## [0.1.0] - 2026-09-23
 
@@ -204,5 +214,6 @@ declaring `go 1.27.1` cannot be built by an older one.
   application embedding mkqd needs a 1.27 toolchain: a module declaring
   `go 1.27.1` cannot be built by an older one.
 
-[Unreleased]: https://github.com/shiroha-a/mkqd/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/shiroha-a/mkqd/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/shiroha-a/mkqd/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/shiroha-a/mkqd/releases/tag/v0.1.0
