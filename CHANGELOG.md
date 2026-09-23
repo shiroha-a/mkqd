@@ -8,6 +8,32 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- mkq 1.1.0.
+
+- Shutdown drains instead of cancelling. Workers stop dequeueing and the
+  handlers already running keep their context and their lock until they
+  return on their own, using mkq 1.1.0's `Worker.Drain`.
+
+  This is what `.tmp/design.md` §6 listed as upstream ask 3. Until mkq
+  had the API, `Runtime.Shutdown` could only cancel, so a job cut
+  mid-flight stayed locked until the BullMQ lock expired and was then
+  redelivered by stalled detection. Correct per BullMQ's at-least-once
+  contract, but for an ActivityPub delivery worker it meant re-sending
+  in-flight posts on every deploy.
+
+  A handler still running when `shutdown_timeout` expires is cancelled
+  and then awaited on a separate five-second grace. That second wait is
+  not optional: mkq's `Drain` returns as soon as it cancels, and the
+  handler finalises its job after that, so closing Redis first would
+  leave the job locked in `active` — exactly the redelivery the drain
+  was meant to avoid.
+
+  **Shutdown can now outlive the context it was given by up to five
+  seconds.** Anything imposing an outer deadline has to budget for
+  `shutdown_timeout` + 5s; under Kubernetes that is
+  `terminationGracePeriodSeconds`, whose default of 30 is too small for
+  the `shutdown_timeout: 30s` in the README's example config.
+
 - Go 1.27.1, matching mkq. The `go` directive moves with it, so an
   application embedding mkqd needs a 1.27 toolchain: a module declaring
   `go 1.27.1` cannot be built by an older one.

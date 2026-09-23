@@ -34,10 +34,14 @@ type Runtime struct {
 	reg    *prometheus.Registry
 	srv    *healthServer
 
+	// unwindGrace は drain が猶予切れしたあとの巻き取り待ちの上限。
+	// 既定は defaultUnwindGrace で、テストだけが縮める。
+	unwindGrace time.Duration
+
 	mu       sync.Mutex
 	registry map[string]registration
 	order    []string
-	workers  []*mkq.Worker
+	workers  []runningWorker
 	started  bool
 	stopped  bool
 
@@ -64,9 +68,10 @@ func New(ctx context.Context, cfg Config) (*Runtime, error) {
 	}
 
 	rt := &Runtime{
-		cfg:      cfg,
-		log:      logger,
-		registry: map[string]registration{},
+		cfg:         cfg,
+		log:         logger,
+		registry:    map[string]registration{},
+		unwindGrace: defaultUnwindGrace,
 	}
 
 	mkqCfg := mkq.Config{
@@ -149,10 +154,10 @@ func (rt *Runtime) Start(ctx context.Context) error {
 		if err != nil {
 			// 起動途中で失敗した場合、既に立ち上がった worker を残すと
 			// ジョブを掴んだまま宙に浮く。ここで巻き戻す。
-			rt.stopWorkers(context.Background())
+			rt.abortWorkers()
 			return fmt.Errorf("mkqd: start worker for queue %q: %w", name, err)
 		}
-		rt.workers = append(rt.workers, w)
+		rt.workers = append(rt.workers, runningWorker{name: name, w: w})
 		rt.log.Info("queue started",
 			"queue", name,
 			"concurrency", tune.concurrency,
@@ -164,7 +169,7 @@ func (rt *Runtime) Start(ctx context.Context) error {
 	if rt.cfg.serverEnabled() {
 		srv, err := newHealthServer(rt)
 		if err != nil {
-			rt.stopWorkers(context.Background())
+			rt.abortWorkers()
 			return err
 		}
 		rt.srv = srv
@@ -188,7 +193,7 @@ func (rt *Runtime) Run(ctx context.Context) error {
 
 	<-sigCtx.Done()
 	stop()
-	rt.log.Info("shutting down; in-flight handlers are cancelled and awaited",
+	rt.log.Info("shutting down; in-flight handlers are allowed to finish",
 		"timeout", rt.cfg.ShutdownTimeout.Duration())
 
 	// シャットダウンは親 ctx から切り離す。SIGTERM で cancel された ctx を
@@ -198,20 +203,39 @@ func (rt *Runtime) Run(ctx context.Context) error {
 	return rt.Shutdown(shutdownCtx)
 }
 
-// Shutdown stops the health listener, stops every worker, and closes
+// defaultUnwindGrace bounds the second wait that follows a drain which
+// ran out of budget.
+//
+// **この猶予を削ると drain の意味が消える。** 猶予切れの Drain は handler を
+// cancel した時点で戻る (mkq の契約)。handler が moveToFinished を撃つのは
+// そのあとなので、ここで待たずに Redis を閉じると、ジョブは active に lock
+// されたまま残り stalled recovery が再配送する — drain が避けたかったことが
+// そのまま起きる。ShutdownTimeout とは別枠にしてあるのは、これが「運用者が
+// 与えた猶予」ではなく「後始末に要る最低限」だから。
+const defaultUnwindGrace = 5 * time.Second
+
+// Shutdown stops the health listener, drains every worker, and closes
 // the Redis connections. It is idempotent.
 //
-// **In-flight jobs are cancelled, not drained.** mkq derives each job
-// context from the worker's run context, so Worker.Stop cancels running
-// handlers and then waits for them to return; ctx bounds that wait. A
-// handler that honours its context therefore gets the chance to wind
-// down, but not to run to completion. Work interrupted this way stays
-// locked until the BullMQ lock expires and is then recovered by stalled
-// detection, which is the at-least-once behaviour BullMQ specifies.
+// **In-flight jobs are allowed to finish.** Workers stop dequeueing and
+// the handlers already running keep their context and their lock until
+// they return on their own; ctx bounds that wait. A handler that runs
+// past the budget is then cancelled and awaited separately, which is
+// the old behaviour for that case only.
 //
-// 真の drain (新規 dequeue だけ止めて実行中は完走させる) は mkq 側に
-// その口がないため提供できない。upstream への提案事項として
-// `.tmp/design.md` の §6 に記録してある。
+// **Shutdown can therefore outlive ctx by up to five seconds.** ctx
+// bounds the drain, not the call: once it expires the handlers are
+// cancelled and given a further defaultUnwindGrace to finalise their
+// jobs, because returning before that would leave them locked in
+// `active` for stalled recovery to redeliver. Size any outer deadline
+// — a container runtime's termination grace period, say — for
+// ctx + defaultUnwindGrace, or the process is killed mid-unwind and
+// the redelivery happens anyway.
+//
+// 配送系では、これが再送の有無を分ける。cancel して落とすと掴んでいた
+// ジョブは lock TTL が切れるまで active に残り、stalled detection が回収して
+// 再試行する。BullMQ の at-least-once 仕様どおりで正しさは保たれるが、
+// 「相手には届いていたのにもう一度送る」がデプロイのたびに出る。
 func (rt *Runtime) Shutdown(ctx context.Context) error {
 	rt.stopOnce.Do(func() {
 		var errs []error
@@ -247,29 +271,94 @@ func (rt *Runtime) Shutdown(ctx context.Context) error {
 	return rt.stopErr
 }
 
-// stopWorkers stops every running worker concurrently. Workers are
+// stopWorkers drains every running worker concurrently. Workers are
 // independent, so a slow queue must not serialise behind another.
 func (rt *Runtime) stopWorkers(ctx context.Context) error {
-	rt.mu.Lock()
-	workers := rt.workers
-	rt.workers = nil
-	rt.mu.Unlock()
-
+	workers := rt.takeWorkers()
 	if len(workers) == 0 {
 		return nil
 	}
 
 	errs := make([]error, len(workers))
 	var wg sync.WaitGroup
-	for i, w := range workers {
+	for i, rw := range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = w.Stop(ctx)
+			errs[i] = rt.drainWorker(ctx, rw)
 		}()
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// takeWorkers hands over the running workers and clears the field, so
+// only one caller can ever shut them down.
+func (rt *Runtime) takeWorkers() []runningWorker {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	workers := rt.workers
+	rt.workers = nil
+	return workers
+}
+
+// abortWorkers tears down the workers started so far when Start itself
+// fails partway.
+//
+// **ここは drain しない。** 起動に失敗した以上プロセスは上がらないので、
+// 掴んでいるジョブを完走させる意味がない。それ以上に、drain に無期限の
+// context を渡すと handler が戻るまで Start が返らなくなる。起動エラーは
+// 即座に報告されるべきものなので、cancel して巻き取りだけ待つ。
+func (rt *Runtime) abortWorkers() {
+	workers := rt.takeWorkers()
+	if len(workers) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), rt.unwindGrace)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, rw := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := rw.w.Stop(ctx); err != nil {
+				rt.log.Warn("worker did not stop cleanly during startup rollback",
+					"queue", rw.name, "error", err)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// drainWorker lets a worker finish what it is holding, falling back to
+// cancellation when the caller's budget runs out.
+//
+// mkq's Drain returns as soon as it cancels, so the wait for the
+// handlers to unwind is a second, separate call. It gets its own
+// context: ctx is already expired by then, and passing it would make
+// Stop return immediately, leaving the finalisation racing the Redis
+// close that follows.
+func (rt *Runtime) drainWorker(ctx context.Context, rw runningWorker) error {
+	err := rw.w.Drain(ctx)
+	if err == nil {
+		return nil
+	}
+
+	rt.log.Warn("drain budget expired; cancelling in-flight handlers",
+		"queue", rw.name, "error", err, "unwind_grace", rt.unwindGrace)
+
+	unwindCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rt.unwindGrace)
+	defer cancel()
+	return rw.w.Stop(unwindCtx)
+}
+
+// runningWorker pairs a worker with its queue name, which is what makes
+// a shutdown warning actionable — mkq.Worker does not expose the name.
+type runningWorker struct {
+	name string
+	w    *mkq.Worker
 }
 
 // warnPoolSize flags the case where queues registered in code push the

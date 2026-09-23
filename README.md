@@ -126,13 +126,25 @@ the listener entirely.
 SIGINT or SIGTERM stops the listener and the workers, bounded by
 `shutdown_timeout`.
 
-In-flight jobs are **cancelled, not drained**. mkq derives each job's
-context from the worker's run context, so a handler receives a
-cancellation and then has until the timeout to wind down and return.
-Work cut short this way stays locked until the BullMQ lock expires and
-is recovered by stalled detection — the at-least-once behaviour BullMQ
-specifies. Handlers should treat context cancellation as "stop soon and
-leave the job safe to retry".
+In-flight jobs are **drained, not cancelled**. Workers stop taking new
+work; a handler that is already running keeps its context and its lock
+and finishes normally. For a delivery worker this is the difference
+between a clean deploy and re-sending everything that was in flight:
+a cancelled job stays locked until the BullMQ lock expires, is then
+recovered by stalled detection, and goes out a second time.
+
+A handler still running when `shutdown_timeout` expires is cancelled
+and given a further five seconds to unwind — long enough for it to
+finalise the job before the Redis connections close, which is what
+keeps that job out of stalled recovery too. Handlers should treat
+context cancellation as "stop soon and leave the job safe to retry".
+
+**Budget for `shutdown_timeout` + 5s when you set an outer deadline.**
+Under Kubernetes that is `terminationGracePeriodSeconds`: leave it at
+the default 30 with `shutdown_timeout: 30s` and SIGKILL lands during
+the unwind, which puts the job back into stalled recovery — the thing
+the drain exists to prevent. With the example config above, set it to
+40 or higher.
 
 ## Executors
 
