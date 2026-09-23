@@ -29,6 +29,7 @@ log.Fatal(rt.Run(ctx))
 ```sh
 mkqd check -c mkqd.yaml   # validate the config and reach Redis
 mkqd run   -c mkqd.yaml   # consume the configured queues
+mkqd queues               # what is in Redis under this prefix
 ```
 
 Because mkq speaks BullMQ's wire format, either shape shares queues
@@ -120,6 +121,42 @@ when the total outgrows the pool.
 `/metrics` carries mkq's job counters and histograms alongside the
 standard Go and process collectors. Set `server.addr: "off"` to skip
 the listener entirely.
+
+## Inspecting queues
+
+Four read-only commands, all taking `-c` for the config and `--json`
+for scripted use:
+
+```sh
+mkqd queues                              # queues present in Redis
+mkqd counts [queue...]                   # job counts per bucket
+mkqd list <queue> <bucket> [-page N] [-size N] [-asc=false]
+mkqd job  <queue> <jobId>                # one job with its state and logs
+```
+
+They open the Redis connection but start no worker, so running them
+against a production deployment costs a few reads and nothing else.
+
+`queues` reports every queue in Redis under the configured prefix, not
+just the ones this process works — a queue created by a BullMQ worker
+in another language shows up with `CONFIGURED = no`.
+
+**A queue name that does not exist is refused rather than created.**
+mkq's `Define` stamps `meta.version` on first use, so a typo would
+otherwise leave a queue behind that shows up in every later listing.
+The name is checked against what is actually in Redis first.
+
+`list` pages with `-page` (zero-based) and `-size`, oldest first by
+default; pass `-asc=false` for BullMQ's newest-first order.
+
+### Counts on a paused queue
+
+`counts` shows a `STATUS` column and no `paused` column, because under
+BullMQ 6 a paused queue holds its jobs in `wait` — the same jobs would
+appear under both headings and an operator adding the row up would
+double count. `--json` carries both: `paused` for the queue status and
+`counts.paused` for mkq's bucket count, which restates `counts.wait`
+while the queue is stopped.
 
 ## Shutdown
 
@@ -432,8 +469,9 @@ silently disabling authentication.
 
 ## Roadmap
 
-- Inspect and admin subcommands (`counts`, `list`, `job`, `enqueue`,
-  `pause`, `resume`, `retry`, `promote`, `rm`, `drain`).
+- Admin subcommands (`enqueue`, `pause`, `resume`, `retry`, `promote`,
+  `rm`, `drain`). The read-only half is in.
+- Honouring a 429's `Retry-After` on the next retry delay.
 - Container image, compose example and an embedded sample application.
 
 ## Development

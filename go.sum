@@ -30,8 +30,8 @@ github.com/redis/go-redis/v9 v9.22.0 h1:laDvpYXTJtZLloinw1fA5Kqd6HAEH2XKxOkG/PDq
 github.com/redis/go-redis/v9 v9.22.0/go.mod h1:y2g0Wj8rQvuK0ELM+oxSudcLtC09JScs98I/X9gRWY4=
 github.com/robfig/cron/v3 v3.0.1 h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=
 github.com/robfig/cron/v3 v3.0.1/go.mod h1:eQICP3HwyT7UooqI/z+Ov+PtYAWygg1TEWWzGIFLtro=
-github.com/shiroha-a/mkq v1.1.0 h1:VtTFtdZnBAb+64HYTSm/ozDS9uTmFYIqYQFye6TabJI=
-github.com/shiroha-a/mkq v1.1.0/go.mod h1:PcQLon1efsYEvU/lzCsANfmfza4CyfGqotGpdF5El5E=
+github.com/shiroha-a/mkq v1.1.1 h1:a3Or1vh5yjaU7KrnvFchWCt18CJtBK4jG/gRxPeg5tg=
+github.com/shiroha-a/mkq v1.1.1/go.mod h1:PcQLon1efsYEvU/lzCsANfmfza4CyfGqotGpdF5El5E=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
 github.com/vmihailenco/msgpack/v5 v5.4.1 h1:cQriyiUvjTwOHg8QZaPihLWeRAAVoCpE00IUPn0Bjt8=

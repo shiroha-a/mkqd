@@ -6,9 +6,31 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Read-only inspect commands: `mkqd queues`, `mkqd counts`, `mkqd list`
+  and `mkqd job`, each with `--json`. They open Redis but start no
+  worker, so they are safe to point at a running deployment.
+
+  `queues` uses mkq's `Client.DiscoverQueues`, so it reports queues
+  created by BullMQ workers in other languages too, marking which ones
+  this process is configured to work.
+
+  **A queue name that does not exist is refused rather than created.**
+  mkq's `Define` stamps `meta.version` and registers the name on first
+  use, so a typo would otherwise leave a queue behind that shows up in
+  every later listing. Names are checked against Redis first.
+
+  `counts` prints a status column and no paused column: under BullMQ 6 a
+  paused queue keeps its jobs in `wait`, so the two headings would show
+  the same jobs and a reader adding the row up would double count. The
+  JSON carries both numbers with that relationship documented.
+
 ### Changed
 
-- mkq 1.1.0.
+- mkq 1.1.1, which fixes `ListJobs(ascending=true)` returning
+  LIST-backed buckets newest-first. `mkqd list` pages oldest-first by
+  default, so it was the caller that surfaced the bug.
 
 - Shutdown drains instead of cancelling. Workers stop dequeueing and the
   handlers already running keep their context and their lock until they
