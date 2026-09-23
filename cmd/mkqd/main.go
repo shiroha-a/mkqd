@@ -1,8 +1,14 @@
 // Command mkqd runs mkq queues as a standalone worker process.
 //
-//	mkqd run   -c mkqd.yaml    consume the configured queues
-//	mkqd check -c mkqd.yaml    validate the config and reach Redis
-//	mkqd version               print the build version
+//	mkqd run    -c mkqd.yaml            consume the configured queues
+//	mkqd check  -c mkqd.yaml            validate the config and reach Redis
+//	mkqd queues                         list the queues present in Redis
+//	mkqd counts [queue...]              job counts per bucket
+//	mkqd list   <queue> <bucket>        list the jobs in one bucket
+//	mkqd job    <queue> <jobId>         show one job in full
+//	mkqd version                        print the build version
+//
+// The read-only commands take --json for scripted use.
 package main
 
 import (
@@ -45,6 +51,10 @@ func commands() []command {
 	return []command{
 		{"run", "consume the configured queues until interrupted", cmdRun},
 		{"check", "validate the config, build executors, ping Redis", cmdCheck},
+		{"queues", "list the queues present in Redis", cmdQueues},
+		{"counts", "job counts per bucket, for one queue or all", cmdCounts},
+		{"list", "list the jobs in one bucket of a queue", cmdList},
+		{"job", "show one job with its state and logs", cmdJob},
 		{"keys", "print where a dir signer looks for a key id", cmdKeys},
 		{"version", "print the mkqd version", cmdVersion},
 	}
