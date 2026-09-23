@@ -149,6 +149,43 @@ The name is checked against what is actually in Redis first.
 `list` pages with `-page` (zero-based) and `-size`, oldest first by
 default; pass `-asc=false` for BullMQ's newest-first order.
 
+## Administering queues
+
+```sh
+mkqd enqueue <queue> '<json>' [--create] [-name N] [-delay 5m] [-priority 3] [-attempts 5] [-id X] [-lifo]
+mkqd pause   <queue>
+mkqd resume  <queue>
+mkqd retry   <queue> <jobId> [-from failed|completed]
+mkqd promote <queue> <jobId>
+mkqd rm      <queue> <jobId>
+mkqd drain   <queue> --yes [-delayed]
+```
+
+`enqueue` will not create a queue that does not exist; pass `--create`
+when you mean to. A typo otherwise buries the job in a queue nothing
+works.
+
+### `mkqd drain` is not the shutdown drain
+
+There are two drains in mkqd and they do opposite things.
+
+| | |
+|---|---|
+| the drain `mkqd run` does on SIGTERM | lets in-flight jobs **finish**. Deletes nothing |
+| `mkqd drain <queue>` | **deletes** the queued jobs |
+
+`--yes` is required, and the command prints what it removed:
+
+```
+$ mkqd drain deliver --yes
+drained deliver: wait=120 prioritized=3
+```
+
+It removes `wait`, `paused` and `prioritized`. `delayed` only with
+`-delayed`, and scheduler iterations survive even then. Active jobs and
+finished ones are left alone — this is "cancel everything pending", not
+a wipe.
+
 ### Counts on a paused queue
 
 `counts` shows a `STATUS` column and no `paused` column, because under
@@ -469,8 +506,6 @@ silently disabling authentication.
 
 ## Roadmap
 
-- Admin subcommands (`enqueue`, `pause`, `resume`, `retry`, `promote`,
-  `rm`, `drain`). The read-only half is in.
 - Honouring a 429's `Retry-After` on the next retry delay.
 - Container image, compose example and an embedded sample application.
 
