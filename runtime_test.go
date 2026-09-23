@@ -3,6 +3,7 @@ package mkqd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mkq"
@@ -68,6 +70,23 @@ func flushPrefix(t *testing.T, prefix string) {
 			return
 		}
 		cursor = next
+	}
+}
+
+// waitFor polls until cond is true or ctx runs out, failing the test on
+// timeout. Redis の状態が非同期に変わるテストで、固定 sleep を置かずに
+// 済ませるため。
+func waitFor(t *testing.T, ctx context.Context, tick time.Duration, cond func() bool) {
+	t.Helper()
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for the condition")
+		case <-time.After(tick):
+		}
 	}
 }
 
@@ -577,4 +596,91 @@ func TestRuntime_AbortWorkersIsBoundedByTheUnwindGrace(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("abortWorkers did not return; the startup rollback is unbounded")
 	}
+}
+
+// TestRuntime_RetryAfterReachesTheDelayedScore is the end-to-end case
+// for the runtime half of the chain.
+//
+// **executor が RetryAfterError を返してから Redis の delayed スコアに
+// なるまで、経由するものが多い。** runtime のフック -> mkq の
+// WithRetryDelayOverride -> moveToDelayed -> delayed ZSET。途中のどこが
+// 切れても「設定どおりの backoff」に静かに落ちるだけで、ログを見ないと
+// 気付けない。
+//
+// httpexec が 429 から RetryAfterError を組み立てるところは、あちらの
+// パッケージで別に検証している (import cycle になるのでここでは使えない)。
+func TestRuntime_RetryAfterReachesTheDelayedScore(t *testing.T) {
+	typ := registerTestExecutor(t, ExecutorFunc(func(context.Context, *Job) (any, error) {
+		return nil, RetryAfter(15*time.Minute, errors.New("429 from the far side"))
+	}))
+
+	cfg := testConfig(t, QueueConfig{Name: "dispatch", Executor: &ExecutorConfig{Type: typ}})
+	rt := newTestRuntime(t, cfg)
+	require.NoError(t, rt.Start(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	// backoff は 1 秒の固定。Retry-After が効いていなければ 1 秒後、効いて
+	// いれば 900 秒後になるので、どちらか判別できる。
+	job, err := Producer[json.RawMessage](rt, "dispatch").Add(ctx,
+		json.RawMessage(`{"x":1}`),
+		mkq.WithAttempts(5),
+		mkq.WithBackoff(mkq.BackoffStrategy{Type: "fixed", Delay: time.Second}),
+	)
+	require.NoError(t, err)
+
+	got := waitForDelayedIn(t, ctx, cfg.KeyPrefix, "dispatch", job.ID)
+	assert.InDelta(t, (15 * time.Minute).Seconds(), got.Seconds(), 30,
+		"the delayed score must reflect Retry-After, not the configured 1s backoff")
+	assert.Greater(t, got, time.Minute,
+		"a 1s fixed backoff would put this well under a minute")
+}
+
+// Retry-After が付いていない失敗は設定どおりの backoff のまま。override が
+// 常に口を出すようになっていないこと。
+func TestRuntime_WithoutRetryAfterTheConfiguredBackoffStands(t *testing.T) {
+	typ := registerTestExecutor(t, ExecutorFunc(func(context.Context, *Job) (any, error) {
+		return nil, errors.New("plain failure, no hint")
+	}))
+
+	cfg := testConfig(t, QueueConfig{Name: "dispatch", Executor: &ExecutorConfig{Type: typ}})
+	rt := newTestRuntime(t, cfg)
+	require.NoError(t, rt.Start(context.Background()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	job, err := Producer[json.RawMessage](rt, "dispatch").Add(ctx,
+		json.RawMessage(`{"x":1}`),
+		mkq.WithAttempts(5),
+		mkq.WithBackoff(mkq.BackoffStrategy{Type: "fixed", Delay: 45 * time.Second}),
+	)
+	require.NoError(t, err)
+
+	got := waitForDelayedIn(t, ctx, cfg.KeyPrefix, "dispatch", job.ID)
+	assert.InDelta(t, (45 * time.Second).Seconds(), got.Seconds(), 10,
+		"without a Retry-After the configured 45s backoff must stand")
+}
+
+// waitForDelayedIn waits for the job to land in the delayed ZSET and
+// returns how far out it was scheduled.
+//
+// **スコアは生のミリ秒ではない。** BullMQ は FIFO を保つため timestamp を
+// 12 bit 左シフトし、下位に連番を詰める。割り戻さないと 292 年後になる。
+func waitForDelayedIn(t *testing.T, ctx context.Context, prefix, queue, jobID string) time.Duration {
+	t.Helper()
+	rdb := redis.NewClient(&redis.Options{Addr: testRedisAddr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+
+	var score float64
+	waitFor(t, ctx, 50*time.Millisecond, func() bool {
+		s, err := rdb.ZScore(ctx, prefix+":"+queue+":delayed", jobID).Result()
+		if err != nil {
+			return false
+		}
+		score = s
+		return true
+	})
+	return time.Until(time.UnixMilli(int64(score) / 0x1000))
 }

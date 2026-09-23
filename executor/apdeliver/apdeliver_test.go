@@ -1,16 +1,20 @@
 package apdeliver
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -409,4 +413,109 @@ func TestDeliver_ActivityMustBeAnObject(t *testing.T) {
 
 	_, _, hits, _ := rec.snapshot()
 	require.Equal(t, 0, hits, "nothing should reach a remote inbox")
+}
+
+// TestDeliver_RetryAfterRidesAlongWithTheError covers this executor's
+// half of the Retry-After chain.
+//
+// **連合ではこれが本命。** 相手のレート制限に当たったとき、指数バックオフの
+// 都合で早く叩き直すのは相手にも自分にも損で、相手が言ってきた間隔に従うのが
+// いちばん早く届く。
+//
+// The other half — that a RetryAfterError actually moves the delayed
+// score — is covered by TestRuntime_RetryAfterReachesTheDelayedScore in
+// the root package.
+func TestDeliver_RetryAfterRidesAlongWithTheError(t *testing.T) {
+	signer, _ := testSigner(t)
+
+	deliver := func(t *testing.T, status int, retryAfter string) error {
+		t.Helper()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			if retryAfter != "" {
+				w.Header().Set("Retry-After", retryAfter)
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("rate limited"))
+		}))
+		t.Cleanup(srv.Close)
+
+		_, err := testExecutor(t, signer).Execute(context.Background(), job(t, Payload{
+			Inbox:    srv.URL + "/inbox",
+			Activity: json.RawMessage(`{}`),
+		}))
+		return err
+	}
+
+	t.Run("429 with delta-seconds", func(t *testing.T) {
+		err := deliver(t, http.StatusTooManyRequests, "900")
+
+		var ra *mkqd.RetryAfterError
+		require.ErrorAs(t, err, &ra)
+		require.Equal(t, 15*time.Minute, ra.After)
+		// 遅延を載せても失敗の中身は失われない。failedReason に出るのはこちら。
+		require.ErrorContains(t, err, "rate limited")
+		require.NotErrorIs(t, err, mkq.ErrUnrecoverable)
+	})
+
+	// 503 に Retry-After を付けてくる実装は普通にある。429 だけを見ていると
+	// 取りこぼす。
+	t.Run("503 with an HTTP-date", func(t *testing.T) {
+		at := time.Now().UTC().Add(20 * time.Minute).Truncate(time.Second)
+		err := deliver(t, http.StatusServiceUnavailable, at.Format(http.TimeFormat))
+
+		var ra *mkqd.RetryAfterError
+		require.ErrorAs(t, err, &ra)
+		require.InDelta(t, (20 * time.Minute).Seconds(), ra.After.Seconds(), 5)
+	})
+
+	t.Run("no header leaves the error plain", func(t *testing.T) {
+		err := deliver(t, http.StatusTooManyRequests, "")
+
+		require.Error(t, err)
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra),
+			"without the header the configured backoff must stand")
+	})
+
+	// 読めないヘッダは黙って捨てられる。runtime には何も届かないので、
+	// 連合先が独自形式を返しているのを見つける口はこのログだけになる。
+	t.Run("an unusable header is logged", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.Copy(io.Discard, r.Body)
+			w.Header().Set("Retry-After", "soon please")
+			w.WriteHeader(http.StatusTooManyRequests)
+		}))
+		t.Cleanup(srv.Close)
+
+		var buf bytes.Buffer
+		ex, err := New(Options{
+			Signer:              signer,
+			AllowPrivateNetwork: true,
+			Logger: slog.New(slog.NewTextHandler(&buf,
+				&slog.HandlerOptions{Level: slog.LevelDebug})),
+		})
+		require.NoError(t, err)
+
+		_, err = ex.Execute(context.Background(), job(t, Payload{
+			Inbox:    srv.URL + "/inbox",
+			Activity: json.RawMessage(`{}`),
+		}))
+		require.Error(t, err)
+
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra), "an unparseable value must not become a delay")
+		require.Contains(t, buf.String(), "unusable Retry-After")
+		require.Contains(t, buf.String(), "soon please")
+	})
+
+	// 恒久的失敗に遅延を載せてはいけない。載ると「再試行しない」が
+	// 「あとで再試行する」に化ける。
+	t.Run("a permanent failure stays permanent", func(t *testing.T) {
+		err := deliver(t, http.StatusBadRequest, "900")
+
+		require.ErrorIs(t, err, mkq.ErrUnrecoverable)
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra))
+	})
 }

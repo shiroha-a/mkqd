@@ -6,6 +6,30 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- A remote's `Retry-After` now sets that job's next retry delay in place
+  of the configured backoff. Both RFC 9110 forms are read (delta-seconds
+  and HTTP-date), on any retryable response rather than 429 alone, since
+  503 carries the header too. The delay is capped at one hour so a
+  remote cannot park a job for a day per attempt — at any size, including
+  values too large to hold as a duration — and the header never decides
+  *whether* to retry: a permanent failure stays permanent.
+  Applies to the `http`, `webhook` and `activitypub_deliver` executors.
+
+- A `Retry-After` that was sent but could not be read is logged at debug
+  level by the executor. Nothing reaches the runtime in that case, so
+  this is the only trace of it.
+
+- `RetryAfterError`, `RetryAfter` and `ParseRetryAfter` for custom
+  executors to say the same thing. `RetryAfter` returns the error
+  untouched for a non-positive delay, so callers need no guard.
+
+### Changed
+
+- Requires **mkq 1.3.0**, for `WithRetryDelayOverride`. The previous
+  release built against mkq 1.1.1.
+
 ## [0.1.0] - 2026-09-23
 
 First release. mkqd runs [mkq](https://github.com/shiroha-a/mkq) queues

@@ -7,7 +7,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -462,4 +464,83 @@ func TestHTTP_ConfiguredHeadersAreValidatedAtBuildTime(t *testing.T) {
 
 	_, err = newHTTPExecutor(ctx, bc, executorConfig(t, "type: http\nurl: http://x/y\nheaders:\n  X-Ok: \"a\\rb\""))
 	require.ErrorContains(t, err, "invalid value for header")
+}
+
+// TestHTTP_RetryAfterRidesAlongWithTheError covers this executor's half
+// of the Retry-After chain: turning the response header into an error
+// the runtime can read.
+//
+// The other half — that a RetryAfterError actually moves the delayed
+// score — is covered by TestRuntime_RetryAfterReachesTheDelayedScore in
+// the root package.
+func TestHTTP_RetryAfterRidesAlongWithTheError(t *testing.T) {
+	t.Run("429 with delta-seconds", func(t *testing.T) {
+		srv, _ := serve(t, http.StatusTooManyRequests,
+			map[string]string{"Retry-After": "900"}, "slow down")
+		_, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), testJob(`{}`))
+
+		var ra *mkqd.RetryAfterError
+		require.ErrorAs(t, err, &ra)
+		require.Equal(t, 15*time.Minute, ra.After)
+		// 遅延を載せても失敗の中身は失われない。failedReason に出るのはこちら。
+		require.ErrorContains(t, err, "slow down")
+		require.NotErrorIs(t, err, mkq.ErrUnrecoverable)
+	})
+
+	// 503 に Retry-After を付けてくる実装は普通にある。429 だけを見ていると
+	// 取りこぼす。
+	t.Run("503 with an HTTP-date", func(t *testing.T) {
+		at := time.Now().UTC().Add(20 * time.Minute).Truncate(time.Second)
+		srv, _ := serve(t, http.StatusServiceUnavailable,
+			map[string]string{"Retry-After": at.Format(http.TimeFormat)}, "maintenance")
+		_, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), testJob(`{}`))
+
+		var ra *mkqd.RetryAfterError
+		require.ErrorAs(t, err, &ra)
+		require.InDelta(t, (20 * time.Minute).Seconds(), ra.After.Seconds(), 5)
+	})
+
+	t.Run("no header leaves the error plain", func(t *testing.T) {
+		srv, _ := serve(t, http.StatusTooManyRequests, nil, "slow down")
+		_, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), testJob(`{}`))
+
+		require.Error(t, err)
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra),
+			"without the header the configured backoff must stand")
+	})
+
+	// 読めないヘッダは黙って捨てられる。runtime には何も届かないので、
+	// 「送っているのに効かない」を追う手掛かりはこのログだけになる。
+	t.Run("an unusable header is logged", func(t *testing.T) {
+		srv, _ := serve(t, http.StatusTooManyRequests,
+			map[string]string{"Retry-After": "soon please"}, "slow down")
+
+		var buf bytes.Buffer
+		ex, err := newHTTPExecutor(context.Background(),
+			mkqd.BuildContext{Queue: "q", Logger: slog.New(slog.NewTextHandler(&buf,
+				&slog.HandlerOptions{Level: slog.LevelDebug}))},
+			executorConfig(t, "type: http\nurl: "+srv.URL))
+		require.NoError(t, err)
+
+		_, err = ex.Execute(context.Background(), testJob(`{}`))
+		require.Error(t, err)
+
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra), "an unparseable value must not become a delay")
+		require.Contains(t, buf.String(), "unusable Retry-After")
+		require.Contains(t, buf.String(), "soon please")
+	})
+
+	// 恒久的失敗に遅延を載せてはいけない。載ると「再試行しない」が
+	// 「あとで再試行する」に化ける。
+	t.Run("a permanent failure stays permanent", func(t *testing.T) {
+		srv, _ := serve(t, http.StatusBadRequest,
+			map[string]string{"Retry-After": "900"}, "malformed")
+		_, err := buildHTTP(t, "type: http\nurl: "+srv.URL).Execute(context.Background(), testJob(`{}`))
+
+		require.ErrorIs(t, err, mkq.ErrUnrecoverable)
+		var ra *mkqd.RetryAfterError
+		require.False(t, errors.As(err, &ra))
+	})
 }

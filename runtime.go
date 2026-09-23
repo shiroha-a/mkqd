@@ -150,7 +150,7 @@ func (rt *Runtime) Start(ctx context.Context) error {
 	for _, name := range names {
 		r := rt.registry[name]
 		tune := rt.resolveTuning(r)
-		w, err := r.start(rt, tune.workerOptions(name))
+		w, err := r.start(rt, rt.workerOptionsFor(tune, name))
 		if err != nil {
 			// 起動途中で失敗した場合、既に立ち上がった worker を残すと
 			// ジョブを掴んだまま宙に浮く。ここで巻き戻す。

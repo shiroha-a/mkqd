@@ -220,23 +220,28 @@ func (s *sender) send(ctx context.Context, target string, body []byte, secret st
 		return nil, fmt.Errorf("mkqd/http: POST %s: read response: %w", target, readErr)
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
-		if ra := resp.Header.Get("Retry-After"); ra != "" {
-			// mkq の WithBackoffStrategy はジョブ文脈を受け取らないので、
-			// この値を次回遅延に反映する口がない。運用者が気づけるように
-			// ログだけ残す。upstream 課題として記録済み。
-			s.log.Warn("Retry-After is not applied to the retry delay",
-				"job_id", job.ID, "retry_after", ra, "url", target)
-		}
-	}
-
 	switch outcome := classify(resp.StatusCode, resp.Header); outcome {
 	case outcomeSuccess:
 		return returnValue(resp.Header, payload), nil
 	case outcomePermanent:
 		return nil, permanent("POST %s: %s: %s", target, resp.Status, detail(resp.Header, payload))
 	default:
-		return nil, fmt.Errorf("mkqd/http: POST %s: %s: %s", target, resp.Status, detail(resp.Header, payload))
+		err := fmt.Errorf("mkqd/http: POST %s: %s: %s", target, resp.Status, detail(resp.Header, payload))
+		// **相手が「いつ来い」と言っているなら従う。** 429 に限らず、
+		// Retry-After を付けてくる応答はすべて拾う (503 に付ける実装がある)。
+		// runtime が mkq の WithRetryDelayOverride でこれを取り出し、その
+		// ジョブの遅延に使う。付いていなければ設定どおりの backoff のまま。
+		if ra := resp.Header.Get("Retry-After"); ra != "" {
+			if d, ok := mkqd.ParseRetryAfter(ra, time.Now()); ok {
+				return nil, mkqd.RetryAfter(d, err)
+			}
+			// 読めなかったことは runtime からは見えない (そこには何も
+			// 届かないため)。「Retry-After を送っているのに効かない」を
+			// 追うとき、ここだけが手掛かりになる。
+			s.log.Debug("ignoring an unusable Retry-After",
+				"job_id", job.ID, "url", target, "retry_after", ra)
+		}
+		return nil, err
 	}
 }
 
