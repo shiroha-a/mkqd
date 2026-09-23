@@ -219,30 +219,36 @@ func TestRuntime_CodeOptionsOverrideDefaults(t *testing.T) {
 }
 
 // Shutdown cancels the running handler and then waits for it to return.
-// mkq derives the job context from the worker run context, so a
-// handler cannot run to completion past Shutdown — it gets a
-// cancellation and a chance to wind down. This test pins that
-// contract, because mkqd's docs promise exactly this and nothing more.
-func TestRuntime_ShutdownCancelsThenAwaitsInFlightJob(t *testing.T) {
-	rt := newTestRuntime(t, testConfig(t))
+// Shutdown drains: the worker stops dequeueing but the handler already
+// running keeps its context and finishes on its own.
+//
+// **再送の有無がここで決まる。** cancel して落とすと掴んでいたジョブは lock
+// TTL が切れるまで active に残り、stalled detection が回収して再試行する。
+// 配送系では「相手には届いていたのにもう一度送る」がデプロイのたびに出る。
+// ジョブが completed に入っていることまで見るのは、handler が戻ったことと
+// finalise が Redis に届いたことが別物だから — Drain の godoc が警告している
+// のはまさにそこで、巻き取りの前に接続を閉じると active に取り残される。
+func TestRuntime_ShutdownLetsInFlightJobFinish(t *testing.T) {
+	cfg := testConfig(t)
+	rt := newTestRuntime(t, cfg)
 
 	entered := make(chan struct{})
 	var sawCancel, returned atomic.Bool
 	require.NoError(t, Handle(rt, "slow", func(ctx context.Context, _ *mkq.Job[email]) (any, error) {
 		close(entered)
+		// Shutdown が走りきるより長く居座る。cancel されないことの確認なので、
+		// ctx.Done() を待つのではなく素直に眠る。
 		select {
 		case <-ctx.Done():
 			sawCancel.Store(true)
-		case <-time.After(10 * time.Second):
+		case <-time.After(500 * time.Millisecond):
 		}
-		// 巻き取り処理を模す。Shutdown はここが終わるまで返ってはいけない。
-		time.Sleep(300 * time.Millisecond)
 		returned.Store(true)
 		return nil, nil
 	}, WithConcurrency(1)))
 
 	require.NoError(t, rt.Start(context.Background()))
-	_, err := Producer[email](rt, "slow").Add(context.Background(), email{To: "c@example.com"})
+	job, err := Producer[email](rt, "slow").Add(context.Background(), email{To: "c@example.com"})
 	require.NoError(t, err)
 
 	select {
@@ -256,16 +262,74 @@ func TestRuntime_ShutdownCancelsThenAwaitsInFlightJob(t *testing.T) {
 	start := time.Now()
 	require.NoError(t, rt.Shutdown(ctx))
 
-	require.True(t, sawCancel.Load(), "the handler must observe context cancellation")
+	require.False(t, sawCancel.Load(), "a drained handler must not be cancelled")
 	require.True(t, returned.Load(), "Shutdown must wait for the handler to return")
-	require.GreaterOrEqual(t, time.Since(start), 300*time.Millisecond,
-		"Shutdown returned before the handler finished winding down")
+	require.GreaterOrEqual(t, time.Since(start), 400*time.Millisecond,
+		"Shutdown returned before the handler finished")
+
+	rdb := redis.NewClient(&redis.Options{Addr: testRedisAddr()})
+	defer func() { _ = rdb.Close() }()
+	base := cfg.KeyPrefix + ":slow:"
+
+	score, err := rdb.ZScore(context.Background(), base+"completed", job.ID).Result()
+	require.NoError(t, err, "the job must have been finalised, not left locked in active")
+	require.Positive(t, score)
+
+	active, err := rdb.LLen(context.Background(), base+"active").Result()
+	require.NoError(t, err)
+	require.Zero(t, active, "nothing may be left in active for stalled recovery to redeliver")
+}
+
+// When the drain budget runs out the old behaviour applies to that case
+// only: the handler is cancelled and then awaited on a separate grace,
+// so its finalisation still lands before the Redis connections close.
+func TestRuntime_ShutdownCancelsWhenDrainBudgetExpires(t *testing.T) {
+	cfg := testConfig(t)
+	rt := newTestRuntime(t, cfg)
+	rt.unwindGrace = 5 * time.Second
+
+	entered := make(chan struct{})
+	var sawCancel, returned atomic.Bool
+	require.NoError(t, Handle(rt, "slow", func(ctx context.Context, _ *mkq.Job[email]) (any, error) {
+		close(entered)
+		select {
+		case <-ctx.Done():
+			sawCancel.Store(true)
+		case <-time.After(10 * time.Second):
+		}
+		// 巻き取りを模す。Shutdown はここが終わるまで返ってはいけない。
+		time.Sleep(300 * time.Millisecond)
+		returned.Store(true)
+		return nil, nil
+	}, WithConcurrency(1)))
+
+	require.NoError(t, rt.Start(context.Background()))
+	_, err := Producer[email](rt, "slow").Add(context.Background(), email{To: "e@example.com"})
+	require.NoError(t, err)
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	// drain には足りない猶予を渡す。handler は 10 秒居座るつもりなので
+	// 必ず budget 切れの経路に入る。
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	require.NoError(t, rt.Shutdown(ctx),
+		"the unwind grace absorbs the cancellation, so Shutdown succeeds")
+
+	require.True(t, sawCancel.Load(), "an over-budget handler must be cancelled")
+	require.True(t, returned.Load(), "Shutdown must still wait for it to unwind")
 }
 
 // A handler that ignores its context must not hang the process past
 // shutdown_timeout: Shutdown reports the deadline instead of blocking.
 func TestRuntime_ShutdownDeadlineIsReported(t *testing.T) {
 	rt := newTestRuntime(t, testConfig(t))
+	// 既定の 5 秒を待たない。ここで見たいのは deadline が伝わることだけ。
+	rt.unwindGrace = 200 * time.Millisecond
 
 	entered := make(chan struct{})
 	release := make(chan struct{})
