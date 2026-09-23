@@ -1,0 +1,60 @@
+name: CodeQL
+
+# 静的解析。golangci-lint が「Go として怪しい書き方」を見るのに対して、
+# CodeQL はデータフローを追って「外から来た値がどこへ届くか」を見る。
+#
+# **Go と Actions だけを見る。** `deploy/bullboard` の .js は compose の
+# ダッシュボードで、配るバイナリには入らない。
+#
+# `actions` を入れるのは、workflow が `pull_request` を扱うため。actionlint が
+# 見るのは式の正しさで、script injection のような**セキュリティ**は見ない。
+# 両方要る。
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+  schedule:
+    # 依存もクエリも自分が触らなくても更新される。週 1 で回す。
+    - cron: "30 20 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [go, actions]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        if: matrix.language == 'go'
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+
+      # **autobuild を使わない。** テストは Redis を要求するので、autobuild が
+      # 拾うと余計な失敗になる。`go build ./...` で足りる。
+      - name: Build
+        if: matrix.language == 'go'
+        run: go build ./...
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

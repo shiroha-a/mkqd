@@ -1,0 +1,23 @@
+## golangci-lint の設定。
+##
+## **既定の 5 つ (errcheck / govet / ineffassign / staticcheck / unused) を
+## 土台にする。** `go vet` だけでは見えない層を埋めるのが目的で、linter を
+## 増やすこと自体が目的ではない。足すときは実際に出た指摘を見てから決める。
+##
+## mk-go (shiroha-a/mk) と mkq の設定に揃えてある。3 リポジトリで指摘の傾向が
+## 揃っていないと、片方で通る書き方がもう片方で落ちる。
+version: "2"
+
+linters:
+  default: standard
+
+  exclusions:
+    presets:
+      ## **`fmt.Fprintf` の戻り値まで見ない。** tabwriter や strings.Builder
+      ## への書き込みは失敗しないし、実際のエラーは Flush が返す (CLI は
+      ## そちらを見ている)。1 行ごとに `_, _ =` を付けると読めなくなる。
+      - std-error-handling
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,29 @@
+name: Dependency review
+
+# PR が持ち込む依存を審査する。Dependabot が「既にある依存の更新」を見るのに
+# 対して、こちらは「新しく増える依存」を入り口で見る。
+#
+# **PR へコメントさせない。** `comment-summary-in-pr` は書き込み権限を要求する
+# ので、読み取りだけで済ませる。結果は job の summary に出る。
+#
+# `fail-on-severity` は high から始める。moderate まで落とすと、直接は
+# 到達しない推移依存の指摘で PR が止まりやすい — そちらは govulncheck が
+# 「実際に到達するか」で判定する。
+
+on:
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
