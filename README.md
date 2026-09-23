@@ -139,6 +139,13 @@ finalise the job before the Redis connections close, which is what
 keeps that job out of stalled recovery too. Handlers should treat
 context cancellation as "stop soon and leave the job safe to retry".
 
+**Budget for `shutdown_timeout` + 5s when you set an outer deadline.**
+Under Kubernetes that is `terminationGracePeriodSeconds`: leave it at
+the default 30 with `shutdown_timeout: 30s` and SIGKILL lands during
+the unwind, which puts the job back into stalled recovery — the thing
+the drain exists to prevent. With the example config above, set it to
+40 or higher.
+
 ## Executors
 
 Configuration names an executor type; a factory turns it into running

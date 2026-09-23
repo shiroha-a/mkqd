@@ -286,7 +286,8 @@ func TestRuntime_ShutdownLetsInFlightJobFinish(t *testing.T) {
 func TestRuntime_ShutdownCancelsWhenDrainBudgetExpires(t *testing.T) {
 	cfg := testConfig(t)
 	rt := newTestRuntime(t, cfg)
-	rt.unwindGrace = 5 * time.Second
+	// 既定の 5 秒に依存させない。300ms の巻き取りを吸収できれば足りる。
+	rt.unwindGrace = 2 * time.Second
 
 	entered := make(chan struct{})
 	var sawCancel, returned atomic.Bool
@@ -530,4 +531,50 @@ func getBody(t *testing.T, url string) (string, int) {
 	b, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return string(b), resp.StatusCode
+}
+
+// Start が途中で失敗したときの巻き戻しは、drain ではなく中断でなければ
+// ならない。
+//
+// **ここは drain にすると無期限に待つ。** 巻き戻しは起動途中なので渡せる
+// context が無く、`context.Background()` を drain に渡すと handler が自分から
+// 戻るまで Start が返らない。既にキューに積まれていたジョブを worker が拾って
+// いれば、起動エラーの報告がそのジョブの長さだけ遅れる。プロセスは上がらない
+// と決まっている以上、掴んだジョブを完走させる意味も無い。
+func TestRuntime_AbortWorkersIsBoundedByTheUnwindGrace(t *testing.T) {
+	rt := newTestRuntime(t, testConfig(t))
+	rt.unwindGrace = 500 * time.Millisecond
+
+	entered := make(chan struct{})
+	require.NoError(t, Handle(rt, "slow", func(ctx context.Context, _ *mkq.Job[email]) (any, error) {
+		close(entered)
+		// context を無視して居座る。drain ならここで待たされる。
+		time.Sleep(30 * time.Second)
+		return nil, nil
+	}, WithConcurrency(1)))
+
+	require.NoError(t, rt.Start(context.Background()))
+	_, err := Producer[email](rt, "slow").Add(context.Background(), email{To: "f@example.com"})
+	require.NoError(t, err)
+
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handler never started")
+	}
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		rt.abortWorkers()
+		done <- time.Since(start)
+	}()
+
+	select {
+	case took := <-done:
+		require.Less(t, took, 5*time.Second,
+			"abortWorkers must be bounded by the unwind grace, not by the handler")
+	case <-time.After(5 * time.Second):
+		t.Fatal("abortWorkers did not return; the startup rollback is unbounded")
+	}
 }

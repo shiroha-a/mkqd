@@ -28,6 +28,12 @@ follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leave the job locked in `active` — exactly the redelivery the drain
   was meant to avoid.
 
+  **Shutdown can now outlive the context it was given by up to five
+  seconds.** Anything imposing an outer deadline has to budget for
+  `shutdown_timeout` + 5s; under Kubernetes that is
+  `terminationGracePeriodSeconds`, whose default of 30 is too small for
+  the `shutdown_timeout: 30s` in the README's example config.
+
 - Go 1.27.1, matching mkq. The `go` directive moves with it, so an
   application embedding mkqd needs a 1.27 toolchain: a module declaring
   `go 1.27.1` cannot be built by an older one.
