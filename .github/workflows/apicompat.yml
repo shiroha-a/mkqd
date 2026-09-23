@@ -50,10 +50,8 @@ jobs:
           fi
           gover=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)
           echo "comparing against $base"
-          set +e
-          out=$(GOTOOLCHAIN="go$gover" go run golang.org/x/exp/cmd/gorelease@latest -base="$base" 2>&1)
-          status=$?
-          set -e
+          # gorelease は非互換を見つけると 1 を返すので、ここで落とさない。
+          out=$(GOTOOLCHAIN="go$gover" go run golang.org/x/exp/cmd/gorelease@latest -base="$base" 2>&1 || true)
           {
             echo "### gorelease vs \`$base\`"
             echo
@@ -62,9 +60,33 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$out"
-          # 非互換が見つかったときだけ落とす。「minor が必要」は情報。
-          if echo "$out" | grep -qE "^## incompatible changes"; then
-            echo "::error::public API has incompatible changes; the next release must bump the major version"
+
+          # **gorelease の exit code は使わない。** 非互換を見つけたときも、
+          # 解析に失敗したときも 1 を返すので区別が付かない。出力で判定する。
+          if printf '%s\n' "$out" | grep -q '^## errors'; then
+            echo "::error::gorelease could not analyse the module"
             exit 1
           fi
-          exit $status
+
+          # **`Version` 定数の値変更は除く。** gorelease は公開定数の値変更を
+          # 非互換として報告する (`const x = mkq.Version` のような使い方が
+          # 壊れうるため技術的には正しい)。だが version.go を書き換えるのは
+          # リリースコミットの仕事そのもので、除かないと**すべてのリリース PR が
+          # 落ちる** — このチェックが最も要る場面で。初回のリリース PR (#122) で
+          # 実際に踏んだ。
+          #
+          # 除くのはこの 1 行だけ。他の非互換が並んでいれば残って落ちる。
+          #
+          # mkqd の `Version` は `var` (ldflags で上書きするため) なので、
+          # gorelease は今のところ値変更を報告しない。それでも除外を入れて
+          # あるのは、判定ロジックを 3 リポジトリで揃えるため — `const` に
+          # 変えた瞬間に同じ罠を踏む。
+          incompat=$(printf '%s\n' "$out" \
+            | awk '/^## incompatible changes$/{f=1;next} /^#/{f=0} f' \
+            | grep -vE '^Version: value changed from ' \
+            | grep -v '^$' || true)
+          if [ -n "$incompat" ]; then
+            echo "::error::public API has incompatible changes; the next release must bump the major version"
+            printf '%s\n' "$incompat"
+            exit 1
+          fi
