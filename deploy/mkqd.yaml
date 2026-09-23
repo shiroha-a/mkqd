@@ -1,0 +1,27 @@
+# Config for the compose stack. See mkqd.example.yaml at the repo root
+# for every option with its default.
+
+redis:
+  addrs: ["redis:6379"]
+
+# bull-board reads the same prefix, which is the point of the stack:
+# mkqd and a BullMQ dashboard looking at one set of keys.
+key_prefix: "bull"
+
+log:
+  level: info
+  format: json
+
+server:
+  addr: "0.0.0.0:9464"
+  metrics: true
+
+shutdown_timeout: 30s
+
+queues:
+  # The built-in log executor records each job and succeeds, so the
+  # stack does something visible without any application code.
+  - name: smoke
+    concurrency: 4
+    executor:
+      type: log

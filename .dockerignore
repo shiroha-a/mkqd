@@ -1,0 +1,11 @@
+# ビルドに要らないものは送らない。コンテキストが小さいほどビルドが速い。
+.git
+.github
+.serena
+.tmp
+dist
+mkqd
+mkqd.local.yaml
+deploy
+examples
+*.md
