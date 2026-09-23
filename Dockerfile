@@ -4,7 +4,11 @@
 # distroless base that carries nothing else. The result runs as a
 # non-root user and holds one file.
 
-FROM golang:1.27 AS build
+# **go.mod と同じパッチ版まで固定する。** 浮動タグ (golang:1.27) だと
+# ビルドのたびに中身が変わって再現性が無く、govulncheck が見るのは go.mod 側
+# なので、ここがずれていると **CI は緑のまま配る image だけが古い** という
+# 状態が起きうる。CI がこの一致を検査している。
+FROM golang:1.27.1 AS build
 
 WORKDIR /src
 

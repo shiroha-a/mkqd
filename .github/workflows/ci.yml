@@ -51,3 +51,72 @@ jobs:
         env:
           MKQD_TEST_REDIS_ADDR: 127.0.0.1:6379
         run: go test ./... -race -count=1
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        # **版を固定する。** 新しいチェックが増えると、コードを触っていない
+        # PR が赤くなる。上げるのは明示的な操作にする。
+        #
+        # **toolchain を go.mod の版に固定する。** `go run pkg@version` は
+        # このリポジトリの go.mod を見ず、golangci-lint 自身の `go` directive
+        # (1.26.0) を基準に toolchain を選ぶ。そのままだと
+        # `the Go language version (go1.26) used to build golangci-lint is
+        # lower than the targeted Go version (1.27.1)` で止まる。
+        run: |
+          gover=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)
+          GOWORK=off GOTOOLCHAIN="go$gover" \
+            go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 \
+            run --timeout 10m
+
+      - name: actionlint
+        # CodeQL の actions クエリが見るのは script injection などの
+        # **セキュリティ**で、式の typo・存在しない needs 参照・runs-on の
+        # 誤りといった**正しさ**は見ない。workflow のミスは動かすまで
+        # 分からないので静的に落とす。`run:` の中身は shellcheck へ渡る。
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
+  vulncheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go version pin is consistent between go.mod and Dockerfile
+        # **配る image の Go 版がずれると、CI は緑のまま image だけ古くなる。**
+        # govulncheck が見るのは go.mod 側なので、Dockerfile が浮動タグや
+        # 古い版を指していてもここでは気付けない。一致を明示的に検査する。
+        run: |
+          gomod=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)
+          docker=$(sed -n 's/^FROM golang:\([0-9.]*\) AS build$/\1/p' Dockerfile)
+          echo "go.mod=$gomod Dockerfile=$docker"
+          if [ -z "$docker" ]; then
+            echo "::error::could not read the Go version out of the Dockerfile"
+            exit 1
+          fi
+          if [ "$gomod" != "$docker" ]; then
+            echo "::error::go.mod says $gomod but the Dockerfile builds with $docker"
+            exit 1
+          fi
+
+      - name: govulncheck
+        # Dependabot と補完的。Dependabot は「依存が古い」を見るが、
+        # govulncheck は「その脆弱性に実際に到達するコードパスがあるか」を
+        # 見る。到達しないものに追われず、到達するものを見落とさない。
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...
